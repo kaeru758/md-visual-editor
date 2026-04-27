@@ -28,7 +28,6 @@ export class MarkdownVisualEditorProvider implements vscode.CustomTextEditorProv
       enableScripts: true,
       localResourceRoots: [
         vscode.Uri.joinPath(this.context.extensionUri, 'media'),
-        vscode.Uri.joinPath(this.context.extensionUri, 'node_modules'),
       ],
     };
 
@@ -141,10 +140,10 @@ export class MarkdownVisualEditorProvider implements vscode.CustomTextEditorProv
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.css')
     );
     const markedUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'marked', 'marked.min.js')
+      vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'marked.min.js')
     );
     const mermaidUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'mermaid', 'dist', 'mermaid.min.js')
+      vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'mermaid.min.js')
     );
 
     const cspSource = webview.cspSource;

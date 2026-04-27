@@ -1,0 +1,41 @@
+# =============================================================================
+# .vscodeignore — files excluded from the published .vsix
+# =============================================================================
+# Webview vendor assets (marked.min.js / mermaid.min.js) are copied into
+# media/vendor/ by esbuild.mjs at build time, so node_modules is fully excluded
+# and we publish with `vsce package --no-dependencies`.
+# =============================================================================
+
+# --- Source / build configuration --------------------------------------------
+src/**
+tsconfig.json
+esbuild.mjs
+cspell.json
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# --- Docs and samples (kept out of the .vsix; available on GitHub) -----------
+docs/**
+test-all-features.md
+CONTRIBUTING.md
+
+# --- Editor / VCS / CI -------------------------------------------------------
+.vscode/**
+.vscode-test/**
+.github/**
+.gitignore
+.gitattributes
+.git/**
+.editorconfig
+
+# --- Build / test artifacts --------------------------------------------------
+*.vsix
+**/*.map
+**/*.ts
+**/tsconfig*.json
+**/.eslintrc*
+**/eslint.config.*
+
+# --- Node modules: never ship (vendor assets are copied into media/vendor/) -
+node_modules/**
