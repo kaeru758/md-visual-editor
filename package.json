@@ -1,0 +1,85 @@
+{
+  "name": "md-visual-editor",
+  "displayName": "Markdown Visual Editor",
+  "publisher": "rkojima",
+  "description": "WYSIWYG Markdown editor with GUI editing for 21 Mermaid diagram types and tables. 100% local, no telemetry. / Markdown WYSIWYG エディタ。Mermaid 21 種類とテーブルを GUI 編集可能。完全ローカル動作。",
+  "version": "0.4.1",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kaeru758/md-visual-editor"
+  },
+  "bugs": {
+    "url": "https://github.com/kaeru758/md-visual-editor/issues"
+  },
+  "homepage": "https://github.com/kaeru758/md-visual-editor#readme",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "markdown",
+    "wysiwyg",
+    "mermaid",
+    "diagram",
+    "flowchart",
+    "class diagram",
+    "sequence diagram",
+    "mindmap",
+    "gantt",
+    "er diagram",
+    "state diagram",
+    "pie chart",
+    "journey",
+    "gitgraph",
+    "timeline",
+    "requirement",
+    "c4",
+    "sankey",
+    "xychart",
+    "block",
+    "packet",
+    "architecture",
+    "kanban",
+    "table",
+    "visual editor",
+    "preview"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "mdVisualEditor.markdownEditor",
+        "displayName": "Markdown Visual Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          }
+        ],
+        "priority": "option"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "vscode:prepublish": "node esbuild.mjs --production"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.19.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "marked": "^4.3.0",
+    "mermaid": "^11.14.0"
+  },
+  "overrides": {
+  }
+}
