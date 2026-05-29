@@ -24,12 +24,32 @@ async function copyVendorAssets() {
       src: path.join(path.dirname(req.resolve('mermaid/package.json')), 'dist', 'mermaid.min.js'),
       dest: path.join(vendorDir, 'mermaid.min.js'),
     },
+    {
+      src: path.join(path.dirname(req.resolve('katex/package.json')), 'dist', 'katex.min.js'),
+      dest: path.join(vendorDir, 'katex.min.js'),
+    },
+    {
+      src: path.join(path.dirname(req.resolve('katex/package.json')), 'dist', 'katex.min.css'),
+      dest: path.join(vendorDir, 'katex.min.css'),
+    },
   ];
 
   for (const { src, dest } of targets) {
     await fs.copyFile(src, dest);
     console.log(`[vendor] copied ${path.relative(process.cwd(), src)} -> ${path.relative(process.cwd(), dest)}`);
   }
+
+  // Copy KaTeX fonts (needed by katex.min.css via relative ./fonts/ urls).
+  const katexFontsSrc = path.join(path.dirname(req.resolve('katex/package.json')), 'dist', 'fonts');
+  const katexFontsDest = path.join(vendorDir, 'fonts');
+  await fs.mkdir(katexFontsDest, { recursive: true });
+  const fontFiles = await fs.readdir(katexFontsSrc);
+  for (const f of fontFiles) {
+    // Skip .ttf to keep package size down — modern browsers (Electron) support woff/woff2.
+    if (f.endsWith('.ttf')) continue;
+    await fs.copyFile(path.join(katexFontsSrc, f), path.join(katexFontsDest, f));
+  }
+  console.log(`[vendor] copied ${fontFiles.filter(f => !f.endsWith('.ttf')).length} KaTeX font files -> ${path.relative(process.cwd(), katexFontsDest)}`);
 }
 
 await copyVendorAssets();
