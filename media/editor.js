@@ -12,6 +12,8 @@
   let preventBlurFinish = false;
   /** Whether mermaid is available */
   let mermaidAvailable = false;
+  /** Last-saved markdown (the "before" baseline for change highlighting). null until known. */
+  let baselineText = null;
 
   // ─── Global Error Handler ───
   window.addEventListener('error', (e) => {
@@ -48,6 +50,19 @@
         break;
       case 'saveStatus':
         updateSaveStatus(!!message.dirty);
+        // A non-dirty document means the on-disk content matches the editor:
+        // adopt it as the new "before" baseline so change highlights clear on
+        // save (and are established on first load).
+        if (!message.dirty) {
+          baselineText = getFullMarkdown();
+        }
+        updateChangedHighlights();
+        break;
+      case 'imageResolved':
+        handleImageResolved(message);
+        break;
+      case 'imageSaved':
+        handleImageSaved(message);
         break;
     }
   });
@@ -542,6 +557,7 @@
       case 'table': return '| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n|  |  |  |';
       case 'codeblock': return '```\nコード\n```';
       case 'mermaid': return '```mermaid\ngraph TD\n    A[開始] --> B[処理]\n    B --> C[終了]\n```';
+      case 'math': return '```math\nE = mc^2\n```';
       default: return null;
     }
   }
@@ -551,6 +567,8 @@
     // @ts-ignore
     allTokens = marked.lexer(markdownText);
     editingBlockIndex = -1;
+    // Structural changes invalidate prior block indices.
+    clearBlockSelection();
     // Sweep any leftover mermaid bombs from a previous render pass.
     cleanupMermaidOrphans();
     renderAllBlocks();
@@ -563,6 +581,46 @@
   function sendEdit(text) {
     vscode.postMessage({ type: 'edit', text: text });
     updateSaveStatus(true);
+    updateChangedHighlights();
+  }
+
+  // ─── Change Highlighting (before/after vs last-saved baseline) ───
+  // VS Code's built-in diff doesn't reach this custom editor, so we surface
+  // which blocks differ from the last-saved content right in the visual view.
+  // Matching is by block raw text: a current block whose raw isn't present in
+  // the baseline (consuming one occurrence) is flagged as changed/added.
+  function buildBaselineRawCounts() {
+    if (baselineText == null) return null;
+    let toks;
+    // @ts-ignore
+    try { toks = marked.lexer(baselineText); } catch { return null; }
+    const counts = new Map();
+    for (const t of toks) {
+      if (t.type === 'space') continue;
+      counts.set(t.raw, (counts.get(t.raw) || 0) + 1);
+    }
+    return counts;
+  }
+
+  function updateChangedHighlights() {
+    const editor = document.getElementById('editor');
+    if (!editor) return;
+    const counts = buildBaselineRawCounts();
+    // Blocks appear in DOM order, which matches token order — consume baseline
+    // occurrences left-to-right so duplicate blocks match correctly.
+    const blocks = editor.querySelectorAll('.block[data-token-index]');
+    blocks.forEach((blockEl) => {
+      let changed = false;
+      if (counts) {
+        const idx = parseInt(blockEl.dataset.tokenIndex, 10);
+        const token = allTokens[idx];
+        const raw = token ? token.raw : undefined;
+        const remaining = raw !== undefined ? (counts.get(raw) || 0) : 0;
+        if (remaining > 0) { counts.set(raw, remaining - 1); }
+        else { changed = true; }
+      }
+      blockEl.classList.toggle('block-changed', changed);
+    });
   }
 
   // ─── Render ───
@@ -622,12 +680,38 @@
       block.setAttribute('role', 'group');
       block.setAttribute('aria-label', 'ブロック (' + (token.type || 'text') + ')');
 
+      // Drag handle for reordering (visible on hover)
+      const handle = document.createElement('div');
+      handle.className = 'block-drag-handle';
+      handle.setAttribute('draggable', 'true');
+      handle.setAttribute('aria-label', 'ドラッグして並び替え');
+      handle.title = 'ドラッグして並び替え';
+      handle.textContent = '⋮⋮';
+      attachBlockDragHandlers(handle, block);
+      block.appendChild(handle);
+
+      // Also allow dragging the block itself (so users can reorder by
+      // grabbing anywhere on the highlighted area). Text selection and
+      // interactive elements are excluded inside dragstart.
+      block.setAttribute('draggable', 'true');
+      attachBlockSelfDragSource(block);
+
       renderBlockContent(block, token, index);
 
       block.addEventListener('dblclick', (e) => {
         if (e.target.tagName === 'A') return;
         if (e.target.closest('.mermaid-edit-overlay')) return;
+        if (e.target.closest('.block-drag-handle')) return;
         startEditing(index);
+      });
+
+      // Click selection (plain / Ctrl / Shift). Skipped if the click landed
+      // on an interactive child (link, button, input, etc.) or while editing.
+      block.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        if (block.classList.contains('editing')) return;
+        if (e.target.closest('a, button, input, textarea, select, label, .block-drag-handle, .mermaid-edit-overlay, .dve-ctxmenu, .table-ctx-menu')) return;
+        handleBlockSelectionClick(index, e);
       });
 
       block.addEventListener('keydown', (e) => {
@@ -636,13 +720,38 @@
           e.preventDefault();
           startEditing(index);
         }
+        if (e.key === 'Delete' || (e.shiftKey && e.key === 'Delete')) {
+          e.preventDefault();
+          requestDeleteBlock(index);
+        }
       });
+
+      // Right-click context menu on the block
+      block.addEventListener('contextmenu', (e) => {
+        // Allow native menus in editing textareas, links, and table-editor.
+        if (block.classList.contains('editing')) return;
+        if (e.target.closest('a, textarea, input, select, .table-ctx-menu')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        // If right-clicking outside the current multi-selection, reset to this block.
+        if (!_selectedBlockIndices.has(index)) {
+          replaceBlockSelection([index]);
+        }
+        showBlockContextMenu(index, e.clientX, e.clientY);
+      });
+
+      // Image drop zone: highlight the block while dragging files over it.
+      attachBlockImageDropHandlers(block, index);
 
       editor.appendChild(block);
     });
 
     // Render mermaid diagrams after DOM is ready
     requestAnimationFrame(() => renderMermaidDiagrams());
+    // Resolve relative image paths via the host extension.
+    requestAnimationFrame(() => resolveRenderedImages());
+    // Flag blocks that differ from the last-saved baseline.
+    updateChangedHighlights();
   }
 
   function renderBlockContent(container, token, index) {
@@ -667,6 +776,23 @@
         e.preventDefault();
         startMermaidEditing(index);
       });
+    } else if (token.type === 'code' && token.lang === 'math') {
+      const wrap = document.createElement('div');
+      wrap.className = 'math-container';
+      const display = document.createElement('div');
+      display.className = 'math-display';
+      display.innerHTML = renderMathToHtml(token.text || '', true);
+      const editBtn = document.createElement('button');
+      editBtn.className = 'mermaid-edit-overlay';
+      editBtn.textContent = '✎ 数式を編集';
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        startMathEditing(index);
+      });
+      wrap.appendChild(display);
+      wrap.appendChild(editBtn);
+      contentDiv.appendChild(wrap);
     } else if (token.type === 'table' && window.TableVisualEditor) {
       // Render table normally but add edit overlay
       try {
@@ -711,7 +837,12 @@
       a.title = (a.title ? a.title + ' — ' : '') + 'クリックで開く';
     });
 
+    // Inline / display math substitution ($..$ and $$..$$) inside rendered text.
+    renderInlineMathInElement(contentDiv);
+
     container.appendChild(contentDiv);
+    // Kick off async resolution of any relative image paths in this block.
+    requestAnimationFrame(() => resolveRenderedImages(container));
   }
 
   async function renderMermaidDiagrams() {
@@ -761,6 +892,11 @@
 
     if (token.type === 'code' && token.lang === 'mermaid') {
       startMermaidEditing(tokenIndex);
+      return;
+    }
+
+    if (token.type === 'code' && token.lang === 'math') {
+      startMathEditing(tokenIndex);
       return;
     }
 
@@ -1318,6 +1454,432 @@
     requestAnimationFrame(() => renderMermaidDiagrams());
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // ─── LaTeX / KaTeX support ───
+  // ═══════════════════════════════════════════════════════════════
+  /** Safely render a TeX string to HTML via KaTeX, or return an error block. */
+  function renderMathToHtml(tex, displayMode) {
+    if (typeof window.katex === 'undefined') {
+      return '<span class="math-fallback">' + escapeHtml(tex) + '</span>';
+    }
+    try {
+      return window.katex.renderToString(String(tex || ''), {
+        displayMode: !!displayMode,
+        throwOnError: false,
+        output: 'html',
+        strict: 'ignore',
+        trust: false,
+      });
+    } catch (e) {
+      return '<span class="math-error" title="' + escapeHtmlAttr(String(e && e.message || e)) + '">'
+        + escapeHtml(tex) + '</span>';
+    }
+  }
+
+  /**
+   * Walk text nodes inside `root` and replace $$...$$ (display) and $...$
+   * (inline) sequences with KaTeX-rendered HTML. Skips text already inside
+   * <code>, <pre>, <a>, .katex, .math-display, .math-error containers.
+   */
+  function renderInlineMathInElement(root) {
+    if (typeof window.katex === 'undefined') return;
+    const SKIP_TAGS = new Set(['CODE', 'PRE', 'SCRIPT', 'STYLE', 'A', 'TEXTAREA']);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        // Skip nodes inside skip tags or KaTeX-rendered subtrees.
+        let p = node.parentNode;
+        while (p && p !== root) {
+          if (p.nodeType === 1) {
+            if (SKIP_TAGS.has(p.tagName)) return NodeFilter.FILTER_REJECT;
+            if (p.classList && (p.classList.contains('katex') || p.classList.contains('math-display') || p.classList.contains('math-error') || p.classList.contains('math-container'))) {
+              return NodeFilter.FILTER_REJECT;
+            }
+          }
+          p = p.parentNode;
+        }
+        return /\$/.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) targets.push(n);
+
+    // Display math first ($$...$$), then inline ($...$). Use non-greedy with no newlines for inline.
+    const DISPLAY_RE = /\$\$([\s\S]+?)\$\$/g;
+    const INLINE_RE = /(^|[^\\$])\$([^\s$][^\n$]*?[^\\\s$]|[^\s\\$])\$(?!\d)/g;
+
+    targets.forEach(textNode => {
+      const original = textNode.nodeValue;
+      if (!original || (!original.includes('$'))) return;
+      // Quick reject: needs at least two $.
+      if (original.indexOf('$') === original.lastIndexOf('$')) return;
+
+      const fragments = []; // array of { type:'text'|'math', text, display? }
+      let lastIdx = 0;
+      let m;
+
+      // First pass: display $$...$$
+      DISPLAY_RE.lastIndex = 0;
+      const displayMatches = [];
+      while ((m = DISPLAY_RE.exec(original)) !== null) {
+        displayMatches.push({ start: m.index, end: m.index + m[0].length, tex: m[1] });
+      }
+
+      let cursor = 0;
+      function pushText(s) { if (s) fragments.push({ type: 'text', text: s }); }
+
+      for (const dm of displayMatches) {
+        if (dm.start > cursor) {
+          // Process inline math in this text chunk.
+          processInline(original.slice(cursor, dm.start), fragments);
+        }
+        fragments.push({ type: 'math', text: dm.tex, display: true });
+        cursor = dm.end;
+      }
+      if (cursor < original.length) {
+        processInline(original.slice(cursor), fragments);
+      }
+
+      function processInline(chunk, out) {
+        INLINE_RE.lastIndex = 0;
+        let last = 0;
+        let mm;
+        const found = [];
+        while ((mm = INLINE_RE.exec(chunk)) !== null) {
+          // Group 1 = preceding char (kept), Group 2 = tex body.
+          const matchStart = mm.index + mm[1].length;
+          const matchEnd = mm.index + mm[0].length;
+          found.push({ start: matchStart, end: matchEnd, tex: mm[2] });
+        }
+        if (!found.length) {
+          out.push({ type: 'text', text: chunk });
+          return;
+        }
+        for (const f of found) {
+          if (f.start > last) out.push({ type: 'text', text: chunk.slice(last, f.start) });
+          out.push({ type: 'math', text: f.tex, display: false });
+          last = f.end;
+        }
+        if (last < chunk.length) out.push({ type: 'text', text: chunk.slice(last) });
+      }
+
+      if (fragments.length === 1 && fragments[0].type === 'text') return;
+
+      // Build replacement.
+      const tpl = document.createElement('span');
+      for (const f of fragments) {
+        if (f.type === 'text') {
+          tpl.appendChild(document.createTextNode(f.text));
+        } else {
+          const holder = document.createElement(f.display ? 'div' : 'span');
+          holder.className = f.display ? 'math-display' : 'math-inline';
+          holder.innerHTML = renderMathToHtml(f.text, f.display);
+          tpl.appendChild(holder);
+        }
+      }
+      // Replace the original text node with the new children.
+      const parent = textNode.parentNode;
+      while (tpl.firstChild) parent.insertBefore(tpl.firstChild, textNode);
+      parent.removeChild(textNode);
+    });
+  }
+
+  // ─── LaTeX symbol palette for the math editor ───
+  // Each entry: { label, insert, title? }
+  // insert may include "$1" / "$2" placeholders — the first becomes the
+  // selection (or caret) and the second positions the caret after insertion.
+  const MATH_PALETTE_GROUPS = [
+    {
+      title: '構造',
+      items: [
+        { label: 'x²',  insert: '$1^{2}',         title: 'べき乗  x^{2}' },
+        { label: 'xⁿ',  insert: '$1^{$2}',        title: 'べき乗  x^{n}' },
+        { label: 'x₁',  insert: '$1_{$2}',        title: '下付き  x_{1}' },
+        { label: 'a⁄b', insert: '\\frac{$1}{$2}', title: '分数  \\frac{a}{b}' },
+        { label: '√x',  insert: '\\sqrt{$1}',     title: '平方根  \\sqrt{x}' },
+        { label: 'ⁿ√x', insert: '\\sqrt[$1]{$2}', title: 'n 乗根  \\sqrt[n]{x}' },
+        { label: '( )', insert: '\\left( $1 \\right)', title: '自動サイズ括弧' },
+        { label: '| |', insert: '\\left| $1 \\right|', title: '絶対値' },
+        { label: '⏟',   insert: '\\underbrace{$1}_{$2}', title: '波括弧 (下)' },
+      ],
+    },
+    {
+      title: '演算子',
+      items: [
+        { label: '×',  insert: '\\times ',  title: '乗算' },
+        { label: '÷',  insert: '\\div ',    title: '除算' },
+        { label: '±',  insert: '\\pm ',     title: 'プラスマイナス' },
+        { label: '∓',  insert: '\\mp ',     title: 'マイナスプラス' },
+        { label: '·',  insert: '\\cdot ',   title: 'ドット積' },
+        { label: '∗',  insert: '\\ast ',    title: 'アスタリスク' },
+        { label: '∘',  insert: '\\circ ',   title: '関数合成' },
+        { label: '⊕',  insert: '\\oplus ',  title: '直和' },
+        { label: '⊗',  insert: '\\otimes ', title: 'テンソル積' },
+      ],
+    },
+    {
+      title: '関係',
+      items: [
+        { label: '≤', insert: '\\le ',     title: '≦' },
+        { label: '≥', insert: '\\ge ',     title: '≧' },
+        { label: '≠', insert: '\\ne ',     title: '≠' },
+        { label: '≈', insert: '\\approx ', title: 'ほぼ等しい' },
+        { label: '≡', insert: '\\equiv ',  title: '合同' },
+        { label: '∝', insert: '\\propto ', title: '比例' },
+        { label: '∼', insert: '\\sim ',    title: '近い' },
+        { label: '→', insert: '\\to ',     title: '右矢印' },
+        { label: '⇒', insert: '\\Rightarrow ', title: '含意' },
+        { label: '⇔', insert: '\\iff ',    title: '同値' },
+      ],
+    },
+    {
+      title: '大記号',
+      items: [
+        { label: '∑',  insert: '\\sum_{$1}^{$2} ', title: '総和' },
+        { label: '∏',  insert: '\\prod_{$1}^{$2} ', title: '総積' },
+        { label: '∫',  insert: '\\int_{$1}^{$2} ', title: '積分' },
+        { label: '∬',  insert: '\\iint ',   title: '重積分' },
+        { label: '∮',  insert: '\\oint ',   title: '周回積分' },
+        { label: 'lim', insert: '\\lim_{$1 \\to $2} ', title: '極限' },
+        { label: '∂',  insert: '\\partial ', title: '偏微分' },
+        { label: '∇',  insert: '\\nabla ',  title: 'ナブラ' },
+        { label: '∞',  insert: '\\infty ',  title: '無限大' },
+      ],
+    },
+    {
+      title: 'ギリシャ',
+      items: [
+        { label: 'α', insert: '\\alpha ' }, { label: 'β', insert: '\\beta ' },
+        { label: 'γ', insert: '\\gamma ' }, { label: 'δ', insert: '\\delta ' },
+        { label: 'ε', insert: '\\varepsilon ' }, { label: 'θ', insert: '\\theta ' },
+        { label: 'λ', insert: '\\lambda ' }, { label: 'μ', insert: '\\mu ' },
+        { label: 'π', insert: '\\pi ' }, { label: 'ρ', insert: '\\rho ' },
+        { label: 'σ', insert: '\\sigma ' }, { label: 'τ', insert: '\\tau ' },
+        { label: 'φ', insert: '\\varphi ' }, { label: 'ω', insert: '\\omega ' },
+        { label: 'Γ', insert: '\\Gamma ' }, { label: 'Δ', insert: '\\Delta ' },
+        { label: 'Θ', insert: '\\Theta ' }, { label: 'Λ', insert: '\\Lambda ' },
+        { label: 'Π', insert: '\\Pi ' },    { label: 'Σ', insert: '\\Sigma ' },
+        { label: 'Φ', insert: '\\Phi ' },   { label: 'Ω', insert: '\\Omega ' },
+      ],
+    },
+    {
+      title: '集合・論理',
+      items: [
+        { label: '∈', insert: '\\in ' }, { label: '∉', insert: '\\notin ' },
+        { label: '⊂', insert: '\\subset ' }, { label: '⊆', insert: '\\subseteq ' },
+        { label: '∪', insert: '\\cup ' }, { label: '∩', insert: '\\cap ' },
+        { label: '∅', insert: '\\emptyset ' },
+        { label: 'ℝ', insert: '\\mathbb{R} ' }, { label: 'ℕ', insert: '\\mathbb{N} ' },
+        { label: 'ℤ', insert: '\\mathbb{Z} ' }, { label: 'ℚ', insert: '\\mathbb{Q} ' },
+        { label: 'ℂ', insert: '\\mathbb{C} ' },
+        { label: '∀', insert: '\\forall ' }, { label: '∃', insert: '\\exists ' },
+        { label: '¬', insert: '\\neg ' }, { label: '∧', insert: '\\wedge ' },
+        { label: '∨', insert: '\\vee ' },
+      ],
+    },
+    {
+      title: '行列・整列',
+      items: [
+        { label: '行列', insert: '\\begin{pmatrix} $1 & $2 \\\\ c & d \\end{pmatrix}', title: 'pmatrix' },
+        { label: '場合分け', insert: '\\begin{cases} $1 & \\text{if } $2 \\\\ b & \\text{otherwise} \\end{cases}', title: 'cases' },
+        { label: '整列', insert: '\\begin{aligned} $1 &= $2 \\\\ &= \\cdots \\end{aligned}', title: 'aligned' },
+      ],
+    },
+  ];
+
+  function buildMathPalette(containerEl, textarea, onChange) {
+    if (!containerEl || !textarea) return;
+    containerEl.innerHTML = '';
+
+    const hint = document.createElement('div');
+    hint.className = 'math-palette-hint';
+    hint.textContent = '記号をクリックすると LaTeX が挿入されます。';
+    containerEl.appendChild(hint);
+
+    MATH_PALETTE_GROUPS.forEach(group => {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'math-palette-group';
+      const label = document.createElement('span');
+      label.className = 'math-palette-group-label';
+      label.textContent = group.title;
+      groupEl.appendChild(label);
+      group.items.forEach(item => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'math-palette-btn';
+        btn.textContent = item.label;
+        btn.title = item.title || item.insert.replace(/\$1|\$2/g, '');
+        // Prevent stealing focus from the textarea on mousedown.
+        btn.addEventListener('mousedown', (e) => e.preventDefault());
+        btn.addEventListener('click', () => {
+          insertSnippetAtCursor(textarea, item.insert);
+          textarea.focus();
+          if (typeof onChange === 'function') onChange();
+        });
+        groupEl.appendChild(btn);
+      });
+      containerEl.appendChild(groupEl);
+    });
+  }
+
+  /**
+   * Insert `snippet` into `textarea` at the current selection.
+   * `$1` is replaced by the current selection (or becomes the new cursor
+   * position when there is no selection). `$2` becomes the second cursor
+   * stop reached when the user presses Tab — for simplicity we just keep
+   * the literal placeholder text "$2" if present so the user can overwrite
+   * it; if absent the cursor lands after the inserted snippet.
+   */
+  function insertSnippetAtCursor(textarea, snippet) {
+    const value = textarea.value;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = value.substring(start, end);
+
+    let body = snippet;
+    let cursorOffset = -1;
+
+    // Replace $1 with the current selection (or empty).
+    if (body.indexOf('$1') >= 0) {
+      body = body.replace('$1', selected);
+      // If there was no selection, place the cursor where $1 was.
+      if (!selected) {
+        cursorOffset = snippet.indexOf('$1');
+      }
+    }
+
+    // If $2 exists and we don't already have a cursor target, place cursor there.
+    if (body.indexOf('$2') >= 0) {
+      const idx2 = body.indexOf('$2');
+      body = body.replace('$2', '');
+      if (cursorOffset < 0) cursorOffset = idx2;
+    }
+
+    textarea.value = value.substring(0, start) + body + value.substring(end);
+    const insertedLen = body.length;
+    let caret;
+    if (cursorOffset >= 0) {
+      caret = start + cursorOffset;
+    } else if (selected) {
+      // Place caret after the inserted snippet.
+      caret = start + insertedLen;
+    } else {
+      caret = start + insertedLen;
+    }
+    textarea.selectionStart = textarea.selectionEnd = caret;
+    // Fire input event so listeners (preview refresh) react.
+    try {
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch (_e) { /* */ }
+  }
+
+  function startMathEditing(tokenIndex) {
+    if (editingBlockIndex >= 0 && editingBlockIndex !== tokenIndex) {
+      finishEditing();
+    }
+    editingBlockIndex = tokenIndex;
+    const token = allTokens[tokenIndex];
+    const blockEl = document.querySelector('[data-token-index="' + tokenIndex + '"]');
+    if (!blockEl) return;
+    blockEl.classList.add('editing');
+
+    blockEl.innerHTML =
+      '<div class="mermaid-editor">' +
+        '<div class="mermaid-editor-code">' +
+          '<div class="mermaid-editor-code-label">LaTeX 数式 (例: E = mc^2 , \\\\frac{a}{b} , \\\\int_0^1 x\\\\,dx )</div>' +
+          '<div class="math-palette" role="toolbar" aria-label="LaTeX 記号パレット"></div>' +
+          '<textarea spellcheck="false">' + escapeHtml(token.text || '') + '</textarea>' +
+        '</div>' +
+        '<div class="mermaid-editor-preview">' +
+          '<div class="mermaid-editor-preview-label">ライブプレビュー</div>' +
+          '<div class="mermaid-editor-preview-content math-preview-content">' +
+            '<div class="loading-indicator">入力してください...</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mermaid-editor-actions">' +
+        '<button class="btn-cancel">キャンセル</button>' +
+        '<button class="btn-save">保存 (Ctrl+Enter)</button>' +
+      '</div>';
+
+    const textarea = blockEl.querySelector('textarea');
+    const previewEl = blockEl.querySelector('.math-preview-content');
+    const saveBtn = blockEl.querySelector('.btn-save');
+    const cancelBtn = blockEl.querySelector('.btn-cancel');
+    const paletteEl = blockEl.querySelector('.math-palette');
+    const originalCode = textarea.value;
+
+    buildMathPalette(paletteEl, textarea, () => refreshPreview());
+
+    function refreshPreview() {
+      const code = textarea.value;
+      if (!code.trim()) {
+        previewEl.innerHTML = '<div class="loading-indicator">数式を入力してください</div>';
+        return;
+      }
+      previewEl.innerHTML = '<div class="math-display">' + renderMathToHtml(code, true) + '</div>';
+    }
+    refreshPreview();
+
+    let debounceTimer;
+    textarea.addEventListener('input', () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(refreshPreview, 200);
+    });
+
+    function tryCancel() {
+      if (textarea.value !== originalCode) {
+        showConfirmDialog(
+          '編集内容を破棄しますか？',
+          () => cancelMathEdit(tokenIndex, blockEl),
+          { okLabel: '破棄', cancelLabel: '編集を続ける', danger: true }
+        );
+      } else {
+        cancelMathEdit(tokenIndex, blockEl);
+      }
+    }
+
+    textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.ctrlKey) {
+        e.preventDefault();
+        saveMathEdit(tokenIndex, textarea.value, blockEl);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        tryCancel();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        textarea.value = textarea.value.substring(0, start) + '    ' + textarea.value.substring(end);
+        textarea.selectionStart = textarea.selectionEnd = start + 4;
+      }
+    });
+
+    saveBtn.addEventListener('click', () => saveMathEdit(tokenIndex, textarea.value, blockEl));
+    cancelBtn.addEventListener('click', tryCancel);
+
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    blockEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function saveMathEdit(tokenIndex, newCode, blockEl) {
+    const token = allTokens[tokenIndex];
+    token.text = newCode;
+    token.raw = '```math\n' + newCode + '\n```\n';
+    editingBlockIndex = -1;
+    blockEl.classList.remove('editing');
+    renderBlockContent(blockEl, token, tokenIndex);
+    sendEdit(getFullMarkdown());
+  }
+
+  function cancelMathEdit(tokenIndex, blockEl) {
+    const token = allTokens[tokenIndex];
+    editingBlockIndex = -1;
+    blockEl.classList.remove('editing');
+    renderBlockContent(blockEl, token, tokenIndex);
+  }
+
   async function renderMermaidPreview(code, containerId, container) {
     if (!code.trim()) {
       container.innerHTML = '<div class="mermaid-error">コードを入力してください</div>';
@@ -1414,6 +1976,809 @@
       .replace(/'/g, '&#39;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // ─── Image Resolution (relative paths → webview URI) ───
+  // ═══════════════════════════════════════════════════════════════
+  /** Map of original src → resolved webview URI (cache across renders). */
+  const _imageUriCache = new Map();
+  /** Map of pending src → array of <img> elements awaiting resolution. */
+  const _pendingImageRequests = new Map();
+  let _imageRequestSeq = 0;
+
+  function isAbsoluteImageSrc(src) {
+    if (!src) return true;
+    // Already a webview-safe scheme or remote URL.
+    return /^(data:|blob:|https?:|vscode-webview:|vscode-resource:|file:)/i.test(src)
+      || src.startsWith('#');
+  }
+
+  function _imageCacheVariants(src) {
+    const set = new Set();
+    if (!src) return set;
+    set.add(src);
+    try { set.add(decodeURI(src)); } catch { /* */ }
+    try { set.add(encodeURI(src)); } catch { /* */ }
+    return set;
+  }
+
+  function _lookupImageCache(src) {
+    for (const key of _imageCacheVariants(src)) {
+      const hit = _imageUriCache.get(key);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  function resolveRenderedImages(scope) {
+    const root = scope || document.getElementById('editor');
+    if (!root) return;
+    const imgs = root.querySelectorAll('img');
+    imgs.forEach(img => {
+      const original = img.getAttribute('data-original-src') || img.getAttribute('src') || '';
+      if (!original) return;
+      if (isAbsoluteImageSrc(original)) return;
+      // Mark with the original src so future renders can match.
+      img.setAttribute('data-original-src', original);
+      const cached = _lookupImageCache(original);
+      if (cached) {
+        if (img.getAttribute('src') !== cached) img.setAttribute('src', cached);
+        img.classList.remove('image-loading');
+        return;
+      }
+      // Add a placeholder alt-ish styling while waiting.
+      img.classList.add('image-loading');
+      let bucket = _pendingImageRequests.get(original);
+      if (!bucket) {
+        bucket = [];
+        _pendingImageRequests.set(original, bucket);
+        const requestId = 'img-' + (++_imageRequestSeq);
+        vscode.postMessage({ type: 'resolveImage', src: original, requestId: requestId });
+      }
+      bucket.push(img);
+    });
+  }
+
+  function handleImageResolved(message) {
+    const src = message && message.src;
+    if (!src) return;
+    const bucket = _pendingImageRequests.get(src) || [];
+    _pendingImageRequests.delete(src);
+    if (message.uri) {
+      for (const key of _imageCacheVariants(src)) {
+        _imageUriCache.set(key, message.uri);
+      }
+      bucket.forEach(img => {
+        img.classList.remove('image-loading');
+        img.setAttribute('src', message.uri);
+      });
+    } else {
+      bucket.forEach(img => {
+        img.classList.remove('image-loading');
+        img.classList.add('image-error');
+        img.title = (img.title ? img.title + ' — ' : '') + '画像を読み込めませんでした';
+      });
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // ─── Drag-and-drop image insertion ───
+  // ═══════════════════════════════════════════════════════════════
+  const _pendingImageSaves = new Map(); // requestId → { afterTokenIndex }
+  let _imageSaveSeq = 0;
+
+  function isImageFile(file) {
+    if (!file) return false;
+    if (file.type && file.type.toLowerCase().startsWith('image/')) return true;
+    const name = (file.name || '').toLowerCase();
+    return /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/.test(name);
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || '');
+        const comma = result.indexOf(',');
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error || new Error('read failed'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleDroppedFiles(files, afterTokenIndex) {
+    if (!files || !files.length) return;
+    let firstInsert = true;
+    for (const file of Array.from(files)) {
+      if (!isImageFile(file)) continue;
+      try {
+        const base64 = await fileToBase64(file);
+        const requestId = 'save-' + (++_imageSaveSeq);
+        // Insert at the end on first drop unless a position was given; subsequent files insert after the just-inserted one.
+        _pendingImageSaves.set(requestId, {
+          afterTokenIndex: (firstInsert ? afterTokenIndex : undefined),
+        });
+        firstInsert = false;
+        vscode.postMessage({
+          type: 'saveImage',
+          requestId,
+          name: file.name || 'image.png',
+          dataBase64: base64,
+        });
+      } catch (e) {
+        console.warn('[Markdown Visual Editor] image read failed:', e);
+      }
+    }
+  }
+
+  function handleImageSaved(message) {
+    const req = _pendingImageSaves.get(message.requestId);
+    _pendingImageSaves.delete(message.requestId);
+    if (!message || !message.ok) return;
+    // Cache the resolved URI right away so the inserted block won't need a round-trip.
+    if (message.relPath && message.webviewUri) {
+      for (const key of _imageCacheVariants(message.relPath)) {
+        _imageUriCache.set(key, message.webviewUri);
+      }
+    }
+    const alt = String(message.altText || '画像');
+    const md = '![' + alt + '](' + String(message.relPath || '') + ')';
+    const blockText = md + '\n';
+
+    const afterIdx = req && typeof req.afterTokenIndex === 'number' ? req.afterTokenIndex : -1;
+    insertMarkdownAtPosition(blockText, afterIdx);
+  }
+
+  function insertMarkdownAtPosition(blockText, afterTokenIndex) {
+    const content = '\n\n' + blockText.trim() + '\n';
+    let fullText;
+    if (afterTokenIndex < 0 || afterTokenIndex >= allTokens.length) {
+      fullText = getFullMarkdown();
+      if (!fullText.endsWith('\n')) fullText += '\n';
+      fullText += content.trimStart();
+    } else {
+      let splitAt = afterTokenIndex + 1;
+      if (splitAt < allTokens.length && allTokens[splitAt].type === 'space') splitAt++;
+      const before = allTokens.slice(0, splitAt).map(t => t.raw).join('');
+      const after = allTokens.slice(splitAt).map(t => t.raw).join('');
+      fullText = before + content + after;
+    }
+    sendEdit(fullText);
+    handleDocumentUpdate(fullText);
+  }
+
+  function attachBlockImageDropHandlers(block, index) {
+    block.addEventListener('dragenter', (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.types) return;
+      if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+      block.classList.add('image-drop-target');
+    });
+    block.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.types) return;
+      if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'copy'; } catch (_e) { /* */ }
+      block.classList.add('image-drop-target');
+    });
+    block.addEventListener('dragleave', (e) => {
+      // Only clear when leaving the block, not its children.
+      if (!block.contains(e.relatedTarget)) block.classList.remove('image-drop-target');
+    });
+    block.addEventListener('drop', (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+      const files = Array.from(e.dataTransfer.files).filter(isImageFile);
+      if (!files.length) return;
+      e.preventDefault();
+      e.stopPropagation();
+      block.classList.remove('image-drop-target');
+      handleDroppedFiles(files, index);
+    });
+  }
+
+  // Editor-wide drop handler (drops onto empty area → append at end).
+  function installEditorWideDropHandlers() {
+    const editor = document.getElementById('editor');
+    if (!editor) return;
+    editor.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.types) return;
+      if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'copy'; } catch (_e) { /* */ }
+    });
+    editor.addEventListener('drop', (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+      // If a block handled it, files length will still be there but we check propagation.
+      // Use a flag via the event target — if drop target is a block, skip (block handler already ran).
+      if (e.defaultPrevented) return;
+      const files = Array.from(e.dataTransfer.files).filter(isImageFile);
+      if (!files.length) return;
+      e.preventDefault();
+      handleDroppedFiles(files, allTokens.length - 1);
+    });
+  }
+  setTimeout(installEditorWideDropHandlers, 0);
+
+  // ═══════════════════════════════════════════════════════════════
+  // ─── Block Context Menu (right-click) ───
+  // ═══════════════════════════════════════════════════════════════
+  function showBlockContextMenu(tokenIndex, clientX, clientY) {
+    if (!window.DiagramCommon || !window.DiagramCommon.showContextMenu) return;
+    const token = allTokens[tokenIndex];
+    if (!token) return;
+
+    // Multi-selection menu: when 2+ blocks are selected and the clicked
+    // block is part of that selection, show batch operations instead.
+    const selected = getSortedSelection();
+    if (selected.length >= 2 && _selectedBlockIndices.has(tokenIndex)) {
+      const count = selected.length;
+      const items = [
+        { label: '✂ 切り取り (' + count + ' 件)', onClick: () => cutSelectedBlocksToClipboard() },
+        { label: '⧉ コピー (' + count + ' 件)', onClick: () => copySelectedBlocksToClipboard() },
+        { label: '📋 貼り付け (このブロックの後ろ)', onClick: () => pasteAfterBlock(tokenIndex) },
+        'separator',
+        { label: '📄 PDF として出力', onClick: () => exportToPdf() },
+        'separator',
+        { label: '🗑 ' + count + ' 件のブロックを削除', danger: true, onClick: () => requestDeleteSelectedBlocks() },
+      ];
+      window.DiagramCommon.showContextMenu(clientX, clientY, items);
+      return;
+    }
+
+    // Find sibling visible (non-space) blocks so move-up/down are sensible.
+    const visibleIdx = [];
+    allTokens.forEach((t, i) => { if (t.type !== 'space') visibleIdx.push(i); });
+    const orderPos = visibleIdx.indexOf(tokenIndex);
+    const canUp = orderPos > 0;
+    const canDown = orderPos >= 0 && orderPos < visibleIdx.length - 1;
+
+    const items = [
+      { label: '✎ 編集', onClick: () => startEditing(tokenIndex) },
+      'separator',
+      { label: '✂ 切り取り', onClick: () => cutBlockToClipboard(tokenIndex) },
+      { label: '⧉ コピー', onClick: () => copyBlockToClipboard(tokenIndex) },
+      { label: '📋 貼り付け (このブロックの後ろ)', onClick: () => pasteAfterBlock(tokenIndex) },
+      'separator',
+      { label: '↑ 上に移動', disabled: !canUp, onClick: () => moveBlock(tokenIndex, -1) },
+      { label: '↓ 下に移動', disabled: !canDown, onClick: () => moveBlock(tokenIndex, +1) },
+      'separator',
+      { label: '📄 PDF として出力', onClick: () => exportToPdf() },
+      'separator',
+      { label: '🗑 削除', danger: true, onClick: () => requestDeleteBlock(tokenIndex) },
+    ];
+    window.DiagramCommon.showContextMenu(clientX, clientY, items);
+  }
+
+  // Editor-background right-click (not on a block) → minimal menu with PDF export.
+  function installEditorContextMenu() {
+    const editor = document.getElementById('editor');
+    if (!editor) return;
+    editor.addEventListener('contextmenu', (e) => {
+      // If the click landed inside a block, the block's own handler already ran.
+      if (e.defaultPrevented) return;
+      if (e.target.closest('.block')) return;
+      if (e.target.closest('a, textarea, input, select, .dve-ctxmenu, .table-ctx-menu')) return;
+      if (!window.DiagramCommon || !window.DiagramCommon.showContextMenu) return;
+      e.preventDefault();
+      window.DiagramCommon.showContextMenu(e.clientX, e.clientY, [
+        { label: '📋 貼り付け (末尾に追加)', onClick: () => pasteAtEnd() },
+        'separator',
+        { label: '📄 PDF として出力', onClick: () => exportToPdf() },
+      ]);
+    });
+  }
+  setTimeout(installEditorContextMenu, 0);
+
+  // ─── Clipboard helpers (block-level cut / copy / paste) ───
+  function _fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_e) { /* */ }
+    document.body.removeChild(ta);
+    return ok;
+  }
+  function writeClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch((err) => {
+        console.warn('[Markdown Visual Editor] clipboard.writeText failed:', err);
+        _fallbackCopy(text);
+      });
+    }
+    _fallbackCopy(text);
+    return Promise.resolve();
+  }
+  async function readClipboard() {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try { return await navigator.clipboard.readText(); }
+      catch (err) {
+        console.warn('[Markdown Visual Editor] clipboard.readText failed:', err);
+      }
+    }
+    return null;
+  }
+  function copyBlockToClipboard(tokenIndex) {
+    const token = allTokens[tokenIndex];
+    if (!token) return Promise.resolve();
+    return writeClipboard(token.raw || '');
+  }
+  function cutBlockToClipboard(tokenIndex) {
+    copyBlockToClipboard(tokenIndex).finally(() => deleteBlock(tokenIndex));
+  }
+  function _insertMarkdownTokens(text, insertAt) {
+    if (!text) return;
+    const pasted = text.endsWith('\n') ? text : text + '\n';
+    let newTokens;
+    try {
+      // @ts-ignore
+      newTokens = marked.lexer(pasted);
+    } catch (_e) {
+      newTokens = null;
+    }
+    if (!newTokens || !newTokens.length) return;
+    if (insertAt < 0) insertAt = 0;
+    if (insertAt > allTokens.length) insertAt = allTokens.length;
+    allTokens.splice(insertAt, 0, ...newTokens);
+    const fullText = getFullMarkdown();
+    sendEdit(fullText);
+    handleDocumentUpdate(fullText);
+  }
+  async function pasteAfterBlock(tokenIndex) {
+    const text = await readClipboard();
+    if (text == null) return;
+    let insertAt = tokenIndex + 1;
+    if (insertAt < allTokens.length && allTokens[insertAt].type === 'space') insertAt++;
+    _insertMarkdownTokens(text, insertAt);
+  }
+  async function pasteAtEnd() {
+    const text = await readClipboard();
+    if (text == null) return;
+    _insertMarkdownTokens(text, allTokens.length);
+  }
+
+  // ─── Multi-block selection (Click / Ctrl-click / Shift-click) ───
+  /** @type {Set<number>} token indices of currently selected blocks */
+  const _selectedBlockIndices = new Set();
+  /** @type {number|null} anchor for Shift-click range selection */
+  let _selectionAnchor = null;
+
+  function _applyBlockSelectionStyles() {
+    document.querySelectorAll('.block.block-selected').forEach(el => {
+      const idx = parseInt(el.dataset.tokenIndex || '', 10);
+      if (isNaN(idx) || !_selectedBlockIndices.has(idx)) {
+        el.classList.remove('block-selected');
+      }
+    });
+    _selectedBlockIndices.forEach(idx => {
+      const el = document.querySelector('[data-token-index="' + idx + '"]');
+      if (el) el.classList.add('block-selected');
+    });
+  }
+
+  function clearBlockSelection() {
+    if (_selectedBlockIndices.size === 0 && _selectionAnchor == null) return;
+    _selectedBlockIndices.clear();
+    _selectionAnchor = null;
+    _applyBlockSelectionStyles();
+  }
+
+  function replaceBlockSelection(indices) {
+    _selectedBlockIndices.clear();
+    indices.forEach(i => _selectedBlockIndices.add(i));
+    _selectionAnchor = indices.length ? indices[indices.length - 1] : null;
+    _applyBlockSelectionStyles();
+  }
+
+  function getSortedSelection() {
+    return Array.from(_selectedBlockIndices).sort((a, b) => a - b);
+  }
+
+  function _visibleBlockIndices() {
+    const out = [];
+    allTokens.forEach((t, i) => { if (t.type !== 'space') out.push(i); });
+    return out;
+  }
+
+  function handleBlockSelectionClick(tokenIndex, e) {
+    const visible = _visibleBlockIndices();
+    if (e.shiftKey && _selectionAnchor != null && visible.includes(_selectionAnchor)) {
+      const a = visible.indexOf(_selectionAnchor);
+      const b = visible.indexOf(tokenIndex);
+      if (b < 0) return;
+      const [lo, hi] = a < b ? [a, b] : [b, a];
+      _selectedBlockIndices.clear();
+      for (let i = lo; i <= hi; i++) _selectedBlockIndices.add(visible[i]);
+      _applyBlockSelectionStyles();
+    } else if (e.ctrlKey || e.metaKey) {
+      if (_selectedBlockIndices.has(tokenIndex)) {
+        _selectedBlockIndices.delete(tokenIndex);
+      } else {
+        _selectedBlockIndices.add(tokenIndex);
+      }
+      _selectionAnchor = tokenIndex;
+      _applyBlockSelectionStyles();
+    } else {
+      replaceBlockSelection([tokenIndex]);
+    }
+    // Focus the block so keyboard shortcuts work without an extra click.
+    const el = document.querySelector('[data-token-index="' + tokenIndex + '"]');
+    if (el && typeof el.focus === 'function') el.focus({ preventScroll: true });
+  }
+
+  /** Serialize the selected blocks (in document order) to a markdown string. */
+  function _serializeSelectedBlocks() {
+    const sorted = getSortedSelection();
+    if (!sorted.length) return '';
+    const parts = sorted
+      .map(i => (allTokens[i] && allTokens[i].raw) || '')
+      .map(s => s.replace(/\s+$/, ''))
+      .filter(s => s.length);
+    return parts.join('\n\n') + '\n';
+  }
+
+  function copySelectedBlocksToClipboard() {
+    const text = _serializeSelectedBlocks();
+    if (!text) return Promise.resolve();
+    return writeClipboard(text);
+  }
+
+  function _deleteBlocksByIndices(sortedIndices) {
+    if (!sortedIndices.length) return;
+    // Walk high → low so prior indices remain valid.
+    for (let k = sortedIndices.length - 1; k >= 0; k--) {
+      const i = sortedIndices[k];
+      if (i < 0 || i >= allTokens.length) continue;
+      let removeCount = 1;
+      if (i + 1 < allTokens.length && allTokens[i + 1].type === 'space') removeCount = 2;
+      allTokens.splice(i, removeCount);
+    }
+    const fullText = getFullMarkdown();
+    sendEdit(fullText);
+    handleDocumentUpdate(fullText);
+  }
+
+  function cutSelectedBlocksToClipboard() {
+    const sorted = getSortedSelection();
+    if (!sorted.length) return;
+    copySelectedBlocksToClipboard().finally(() => _deleteBlocksByIndices(sorted));
+  }
+
+  function requestDeleteSelectedBlocks() {
+    const sorted = getSortedSelection();
+    if (!sorted.length) return;
+    if (sorted.length === 1) {
+      requestDeleteBlock(sorted[0]);
+      return;
+    }
+    showConfirmDialog(
+      sorted.length + ' 件のブロックを削除しますか？',
+      () => _deleteBlocksByIndices(sorted),
+      { okLabel: '削除', cancelLabel: 'キャンセル', danger: true }
+    );
+  }
+
+  // Background click on the editor (outside any block) clears selection.
+  function installSelectionClearOnBackgroundClick() {
+    const editor = document.getElementById('editor');
+    if (!editor) return;
+    editor.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest('.block')) return;
+      if (e.target.closest('.dve-ctxmenu, .table-ctx-menu')) return;
+      clearBlockSelection();
+    });
+  }
+  setTimeout(installSelectionClearOnBackgroundClick, 0);
+
+  // Document-level keyboard shortcuts for block clipboard operations.
+  document.addEventListener('keydown', async (e) => {
+    if (_selectedBlockIndices.size === 0) return;
+    // Don't hijack typing inside any editable surface.
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    if (t && t.closest && t.closest('.editing, .mermaid-editor, .dve-ctxmenu, .table-ctx-menu')) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && (e.key === 'c' || e.key === 'C')) {
+      e.preventDefault();
+      await copySelectedBlocksToClipboard();
+    } else if (mod && (e.key === 'x' || e.key === 'X')) {
+      e.preventDefault();
+      cutSelectedBlocksToClipboard();
+    } else if (mod && (e.key === 'v' || e.key === 'V')) {
+      e.preventDefault();
+      const text = await readClipboard();
+      if (text == null) return;
+      const sorted = getSortedSelection();
+      const last = sorted[sorted.length - 1];
+      let insertAt = last + 1;
+      if (insertAt < allTokens.length && allTokens[insertAt].type === 'space') insertAt++;
+      _insertMarkdownTokens(text, insertAt);
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (_selectedBlockIndices.size >= 2) {
+        e.preventDefault();
+        requestDeleteSelectedBlocks();
+      }
+    } else if (e.key === 'Escape') {
+      clearBlockSelection();
+    }
+  });
+
+  /**
+   * Export the current document to PDF. VS Code webviews silently block
+   * `window.print()`, so we serialize the rendered editor DOM, send it to
+   * the extension host, and let the host write a standalone HTML file and
+   * open it in the system default browser where the print dialog can be
+   * used to "Save as PDF" (with the md file's directory suggested as the
+   * save location).
+   */
+  async function exportToPdf() {
+    // If a block is being edited, commit changes first so the exported view
+    // reflects the latest state.
+    if (editingBlockIndex >= 0) {
+      try { finishEditing(); } catch (_e) { /* */ }
+    }
+    // Dismiss any open lightweight menus / overlays so they don't leak into
+    // the printable snapshot.
+    document.querySelectorAll('.dve-ctxmenu').forEach(m => m.remove());
+
+    const editorEl = document.getElementById('editor');
+    if (!editorEl) {
+      alert('エディタの内容を取得できませんでした。');
+      return;
+    }
+
+    // Work on a detached clone so we can sanitize freely without disturbing
+    // the live editor.
+    const clone = editorEl.cloneNode(true);
+
+    // Restore original (relative) image paths so the extension host can
+    // resolve them against the md file's directory.
+    clone.querySelectorAll('img').forEach(img => {
+      const orig = img.getAttribute('data-original-src');
+      if (orig) {
+        img.setAttribute('src', orig);
+        img.removeAttribute('data-original-src');
+      }
+      img.classList.remove('image-loading', 'image-error');
+    });
+
+    // Strip transient interactive affordances.
+    clone.querySelectorAll('.block').forEach(b => {
+      b.classList.remove('editing', 'selected', 'search-current', 'block-changed');
+      b.removeAttribute('contenteditable');
+      b.removeAttribute('tabindex');
+    });
+    clone.querySelectorAll(
+      '.block-drag-handle, .mermaid-edit-overlay, .mermaid-error-edit, ' +
+      '.dve-ctxmenu, .heading-more-menu, .confirm-dialog-overlay, ' +
+      'mark.search-highlight'
+    ).forEach(n => {
+      // For search highlights, unwrap to keep the inner text.
+      if (n.classList && n.classList.contains('search-highlight')) {
+        const parent = n.parentNode;
+        if (parent) {
+          while (n.firstChild) parent.insertBefore(n.firstChild, n);
+          parent.removeChild(n);
+        }
+      } else {
+        n.remove();
+      }
+    });
+
+    // Re-render Mermaid diagrams with the light theme so the exported PDF
+    // does not carry over dark backgrounds/colors from the webview.
+    if (mermaidAvailable && typeof mermaid !== 'undefined') {
+      try {
+        // @ts-ignore
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: 'default',
+          securityLevel: 'loose',
+          flowchart: { useMaxWidth: true },
+        });
+      } catch (_e) { /* */ }
+      const diagrams = clone.querySelectorAll('.mermaid-diagram[data-mermaid-code]');
+      let i = 0;
+      for (const el of diagrams) {
+        const code = el.getAttribute('data-mermaid-code');
+        if (!code) continue;
+        const rid = 'mdve-pdf-mmd-' + Date.now() + '-' + (i++);
+        try {
+          // @ts-ignore
+          const { svg } = await mermaid.render(rid, code);
+          el.innerHTML = svg;
+        } catch (_e) { /* keep existing rendering on failure */ }
+        finally { try { cleanupMermaidOrphans(rid); } catch (_e2) {} }
+      }
+      // Restore the webview's preferred theme for live editing.
+      try {
+        // @ts-ignore
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: isCurrentlyLight() ? 'default' : 'dark',
+          securityLevel: 'loose',
+          flowchart: { useMaxWidth: true },
+        });
+      } catch (_e) { /* */ }
+    }
+
+    vscode.postMessage({ type: 'exportPdf', html: clone.innerHTML });
+  }
+
+  function requestDeleteBlock(tokenIndex) {
+    const token = allTokens[tokenIndex];
+    if (!token) return;
+    const preview = (token.raw || '').trim().split('\n')[0].slice(0, 60) || '(空のブロック)';
+    showConfirmDialog(
+      'このブロックを削除しますか？\n\n' + preview,
+      () => deleteBlock(tokenIndex),
+      { okLabel: '削除', cancelLabel: 'キャンセル', danger: true }
+    );
+  }
+
+  function deleteBlock(tokenIndex) {
+    if (tokenIndex < 0 || tokenIndex >= allTokens.length) return;
+    if (editingBlockIndex === tokenIndex) {
+      editingBlockIndex = -1;
+    }
+    // Remove the block, and any trailing space token attached to it.
+    let removeCount = 1;
+    if (tokenIndex + 1 < allTokens.length && allTokens[tokenIndex + 1].type === 'space') {
+      removeCount = 2;
+    }
+    allTokens.splice(tokenIndex, removeCount);
+    const fullText = getFullMarkdown();
+    sendEdit(fullText);
+    handleDocumentUpdate(fullText);
+  }
+
+  function moveBlock(tokenIndex, direction) {
+    const visibleIdx = [];
+    allTokens.forEach((t, i) => { if (t.type !== 'space') visibleIdx.push(i); });
+    const pos = visibleIdx.indexOf(tokenIndex);
+    if (pos < 0) return;
+    const targetPos = pos + direction;
+    if (targetPos < 0 || targetPos >= visibleIdx.length) return;
+    const targetIdx = visibleIdx[targetPos];
+    reorderBlock(tokenIndex, direction > 0 ? targetIdx + 1 : targetIdx);
+  }
+
+  /**
+   * Move the block starting at sourceTokenIndex (plus any attached trailing
+   * 'space' token) so that it appears before the token currently at
+   * destBeforeIndex. Indices refer to positions in allTokens *before* moving.
+   */
+  function reorderBlock(sourceTokenIndex, destBeforeIndex) {
+    if (sourceTokenIndex === destBeforeIndex) return;
+    // Determine source slice length (block + optional trailing space).
+    let len = 1;
+    if (sourceTokenIndex + 1 < allTokens.length && allTokens[sourceTokenIndex + 1].type === 'space') {
+      len = 2;
+    }
+    if (destBeforeIndex > sourceTokenIndex && destBeforeIndex < sourceTokenIndex + len) return;
+    const removed = allTokens.splice(sourceTokenIndex, len);
+    let insertAt = destBeforeIndex;
+    if (destBeforeIndex > sourceTokenIndex) insertAt -= len;
+    if (insertAt < 0) insertAt = 0;
+    if (insertAt > allTokens.length) insertAt = allTokens.length;
+    allTokens.splice(insertAt, 0, ...removed);
+    const fullText = getFullMarkdown();
+    sendEdit(fullText);
+    handleDocumentUpdate(fullText);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // ─── Block Drag-and-Drop Reordering ───
+  // ═══════════════════════════════════════════════════════════════
+  let _draggingSourceIndex = -1;
+
+  function attachBlockDragHandlers(handle, block) {
+    handle.addEventListener('dragstart', (e) => {
+      const idx = parseInt(block.dataset.tokenIndex, 10);
+      if (isNaN(idx)) return;
+      _draggingSourceIndex = idx;
+      block.classList.add('block-dragging');
+      try {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('application/x-md-block-index', String(idx));
+        e.dataTransfer.setData('text/plain', '');
+      } catch (_e) { /* */ }
+    });
+    handle.addEventListener('dragend', () => {
+      block.classList.remove('block-dragging');
+      _draggingSourceIndex = -1;
+      document.querySelectorAll('.block-drop-before, .block-drop-after').forEach(b => {
+        b.classList.remove('block-drop-before');
+        b.classList.remove('block-drop-after');
+      });
+    });
+
+    block.addEventListener('dragover', (e) => {
+      if (_draggingSourceIndex < 0) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'move'; } catch (_e) { /* */ }
+      const rect = block.getBoundingClientRect();
+      const before = (e.clientY - rect.top) < rect.height / 2;
+      block.classList.toggle('block-drop-before', before);
+      block.classList.toggle('block-drop-after', !before);
+    });
+    block.addEventListener('dragleave', (e) => {
+      if (!block.contains(e.relatedTarget)) {
+        block.classList.remove('block-drop-before');
+        block.classList.remove('block-drop-after');
+      }
+    });
+    block.addEventListener('drop', (e) => {
+      if (_draggingSourceIndex < 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = block.getBoundingClientRect();
+      const before = (e.clientY - rect.top) < rect.height / 2;
+      const targetIdx = parseInt(block.dataset.tokenIndex, 10);
+      const source = _draggingSourceIndex;
+      _draggingSourceIndex = -1;
+      block.classList.remove('block-drop-before');
+      block.classList.remove('block-drop-after');
+      if (isNaN(targetIdx) || source === targetIdx) return;
+      // Compute destBeforeIndex
+      let dest;
+      if (before) {
+        dest = targetIdx;
+      } else {
+        // After target — include its trailing space if any.
+        dest = targetIdx + 1;
+        if (dest < allTokens.length && allTokens[dest].type === 'space') dest++;
+      }
+      reorderBlock(source, dest);
+    });
+  }
+
+  /**
+   * Add dragstart/dragend handlers to the block element itself so the user
+   * can grab the highlighted area anywhere (not just the small handle).
+   * The block's dragover/dragleave/drop listeners are already attached by
+   * attachBlockDragHandlers(handle, block) and must not be re-registered.
+   */
+  function attachBlockSelfDragSource(block) {
+    block.addEventListener('dragstart', (e) => {
+      if (block.classList.contains('editing')) { e.preventDefault(); return; }
+      const tgt = e.target;
+      // Let the handle's own dragstart fire instead.
+      if (tgt && tgt.closest && tgt.closest('.block-drag-handle')) return;
+      if (tgt && tgt.closest && tgt.closest('a, textarea, input, select, button, .mermaid-edit-overlay, .table-ctx-menu, .dve-ctxmenu')) {
+        e.preventDefault();
+        return;
+      }
+      const sel = window.getSelection && window.getSelection();
+      if (sel && sel.toString && sel.toString().length > 0) {
+        e.preventDefault();
+        return;
+      }
+      const idx = parseInt(block.dataset.tokenIndex, 10);
+      if (isNaN(idx)) return;
+      _draggingSourceIndex = idx;
+      block.classList.add('block-dragging');
+      try {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('application/x-md-block-index', String(idx));
+        e.dataTransfer.setData('text/plain', '');
+      } catch (_e) { /* */ }
+    });
+    block.addEventListener('dragend', () => {
+      block.classList.remove('block-dragging');
+      _draggingSourceIndex = -1;
+      document.querySelectorAll('.block-drop-before, .block-drop-after').forEach(b => {
+        b.classList.remove('block-drop-before');
+        b.classList.remove('block-drop-after');
+      });
+    });
   }
 
   /**

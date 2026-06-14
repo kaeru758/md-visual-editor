@@ -18,6 +18,11 @@
   function _el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
   function _elText(tag, text, cls) { const e = _el(tag, cls); e.textContent = text; return e; }
   function _escHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+  // Convert markdown cell line-breaks (<br>) to real newlines for editing, and back.
+  function _brToNl(s) { return String(s == null ? '' : s).replace(/<br\s*\/?>/gi, '\n'); }
+  function _nlToBr(s) { return String(s == null ? '' : s).replace(/\r?\n/g, '<br>'); }
+  // Resize a <textarea> to fit its content (so wrapped text is fully visible).
+  function _autoGrowTextarea(ta) { ta.style.height = 'auto'; ta.style.height = Math.max(ta.scrollHeight, 24) + 'px'; }
 
   // ─── Inline Edit ───
   function _inlineEdit(parentEl, currentValue, onSave, opts) {
@@ -1860,19 +1865,48 @@
       }
       if (this.rows.length === 0) this.rows.push(new Array(this.headers.length).fill(''));
     }
-    _parseRow(line) { return line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()); }
+    // Cells are stored with real newlines for editing; multi-line content
+    // round-trips through markdown as <br>.
+    _parseRow(line) { return line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => _brToNl(c.trim())); }
     _generate() {
-      const colCount = this.headers.length;
-      const widths = this.headers.map((h, i) => {
+      const headers = this.headers.map(h => _nlToBr(h));
+      const rows = this.rows.map(r => r.map(c => _nlToBr(c)));
+      const widths = headers.map((h, i) => {
         let max = h.length;
-        for (const row of this.rows) max = Math.max(max, (row[i] || '').length);
+        for (const row of rows) max = Math.max(max, (row[i] || '').length);
         return Math.max(max, 3);
       });
       const pad = (str, w) => str + ' '.repeat(Math.max(0, w - str.length));
-      let md = '| ' + this.headers.map((h, i) => pad(h, widths[i])).join(' | ') + ' |\n';
+      let md = '| ' + headers.map((h, i) => pad(h, widths[i])).join(' | ') + ' |\n';
       md += '| ' + widths.map(w => '-'.repeat(w)).join(' | ') + ' |\n';
-      for (const row of this.rows) md += '| ' + row.map((c, i) => pad(c || '', widths[i])).join(' | ') + ' |\n';
+      for (const row of rows) md += '| ' + row.map((c, i) => pad(c || '', widths[i])).join(' | ') + ' |\n';
       return md.trimEnd();
+    }
+    _ensureColWidths() {
+      if (!this.colWidths) this.colWidths = [];
+      while (this.colWidths.length < this.headers.length) this.colWidths.push(160);
+      if (this.colWidths.length > this.headers.length) this.colWidths.length = this.headers.length;
+    }
+    // Drag a column border to resize. Edit-mode only (the visual editor is
+    // only ever shown while editing). Widths are visual-only: markdown tables
+    // don't store column widths, so they aren't persisted to the document.
+    _startColResize(ci, e) {
+      e.preventDefault(); e.stopPropagation();
+      const startX = e.clientX;
+      const startW = this.colWidths[ci] || 160;
+      const onMove = (ev) => {
+        const w = Math.max(50, startW + (ev.clientX - startX));
+        this.colWidths[ci] = w;
+        if (this._colEls && this._colEls[ci]) this._colEls[ci].style.width = w + 'px';
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.classList.remove('tve-col-resizing');
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      document.body.classList.add('tve-col-resizing');
     }
     _buildUI() {
       this.container.innerHTML = ''; this.container.classList.add('table-visual-editor');
@@ -1946,6 +1980,33 @@
     }
     _renderTable() {
       this._tableEl.innerHTML = ''; const colCount = this.headers.length;
+      this._ensureColWidths();
+      const self = this;
+      const grownTextareas = [];
+      // Fixed layout + explicit column widths so cell text wraps instead of
+      // overflowing, and so drag-resize handles take effect.
+      this._tableEl.classList.add('tve-fixed');
+      const colgroup = _el('colgroup', '');
+      this._colEls = [];
+      for (let ci = 0; ci < colCount; ci++) {
+        const col = document.createElement('col');
+        col.style.width = this.colWidths[ci] + 'px';
+        colgroup.appendChild(col); this._colEls.push(col);
+      }
+      const actionsCol = document.createElement('col'); actionsCol.style.width = '34px';
+      colgroup.appendChild(actionsCol);
+      this._tableEl.appendChild(colgroup);
+      // Build an auto-growing textarea cell shared by header and body cells.
+      const makeCell = (value, placeholder, onCommit, onFocus, onCtx) => {
+        const ta = _el('textarea', 'tve-cell');
+        ta.rows = 1; ta.value = value || ''; ta.placeholder = placeholder;
+        ta.addEventListener('input', () => { _autoGrowTextarea(ta); });
+        ta.addEventListener('focus', onFocus);
+        ta.addEventListener('change', () => { onCommit(ta.value); });
+        ta.addEventListener('contextmenu', onCtx);
+        grownTextareas.push(ta);
+        return ta;
+      };
       if (colCount > 1) {
         const cdr = _el('tr', '');
         for (let ci = 0; ci < colCount; ci++) {
@@ -1957,23 +2018,29 @@
       }
       const headerRow = _el('tr', '');
       for (let ci = 0; ci < colCount; ci++) {
-        const th = _el('th', ''); const input = _el('input', ''); input.value = this.headers[ci]; input.placeholder = '列名';
-        const cc = ci;
-        input.addEventListener('focus', () => { this._selectedCol = cc; this._selectedRow = -1; this._updateSelIndicator(); });
-        input.addEventListener('change', () => { this.headers[cc] = input.value; this._emitChange(); });
-        th.addEventListener('contextmenu', (e) => this._showCtxMenu(e, -1, cc));
-        th.appendChild(input); headerRow.appendChild(th);
+        const th = _el('th', ''); const cc = ci;
+        const ta = makeCell(this.headers[ci], '列名',
+          (v) => { this.headers[cc] = v; this._emitChange(); },
+          () => { this._selectedCol = cc; this._selectedRow = -1; this._updateSelIndicator(); },
+          (e) => this._showCtxMenu(e, -1, cc));
+        th.appendChild(ta);
+        // Column resize handle on the right border (edit-mode only).
+        const handle = _el('div', 'col-resize-handle');
+        handle.title = 'ドラッグで列幅を調整';
+        handle.addEventListener('mousedown', (e) => self._startColResize(cc, e));
+        th.appendChild(handle);
+        headerRow.appendChild(th);
       }
       headerRow.appendChild(_el('th', 'row-actions')); this._tableEl.appendChild(headerRow);
       for (let ri = 0; ri < this.rows.length; ri++) {
         const tr = _el('tr', '');
         for (let ci = 0; ci < colCount; ci++) {
-          const td = _el('td', ''); const input = _el('input', ''); input.value = this.rows[ri][ci] || ''; input.placeholder = '...';
-          const cri = ri, cci = ci;
-          input.addEventListener('focus', () => { this._selectedRow = cri; this._selectedCol = cci; this._updateSelIndicator(); });
-          input.addEventListener('change', () => { this.rows[cri][cci] = input.value; this._emitChange(); });
-          td.addEventListener('contextmenu', (e) => this._showCtxMenu(e, cri, cci));
-          td.appendChild(input); tr.appendChild(td);
+          const td = _el('td', ''); const cri = ri, cci = ci;
+          const ta = makeCell(this.rows[ri][ci] || '', '...',
+            (v) => { this.rows[cri][cci] = v; this._emitChange(); },
+            () => { this._selectedRow = cri; this._selectedCol = cci; this._updateSelIndicator(); },
+            (e) => this._showCtxMenu(e, cri, cci));
+          td.appendChild(ta); tr.appendChild(td);
         }
         if (this.rows.length > 1) {
           const actionTd = _el('td', 'row-actions');
@@ -1983,11 +2050,13 @@
         } else tr.appendChild(_el('td', 'row-actions'));
         this._tableEl.appendChild(tr);
       }
+      // Size textareas to their content once they're in the DOM.
+      requestAnimationFrame(() => grownTextareas.forEach(_autoGrowTextarea));
     }
     _emitChange() { this.onChange(this._generate()); }
-    _insertColumn(at) { const idx = Math.max(0, Math.min(at, this.headers.length)); this.headers.splice(idx, 0, '新列'); for (const r of this.rows) r.splice(idx, 0, ''); this._selectedCol = idx; this._renderTable(); this._emitChange(); }
+    _insertColumn(at) { const idx = Math.max(0, Math.min(at, this.headers.length)); this.headers.splice(idx, 0, '新列'); for (const r of this.rows) r.splice(idx, 0, ''); if (this.colWidths) this.colWidths.splice(idx, 0, 160); this._selectedCol = idx; this._renderTable(); this._emitChange(); }
     _insertRow(at) { const idx = Math.max(0, Math.min(at, this.rows.length)); this.rows.splice(idx, 0, new Array(this.headers.length).fill('')); this._selectedRow = idx; this._renderTable(); this._emitChange(); }
-    _deleteColumn(ci) { if (this.headers.length <= 1) return; this.headers.splice(ci, 1); for (const r of this.rows) r.splice(ci, 1); if (this._selectedCol >= this.headers.length) this._selectedCol = this.headers.length - 1; this._renderTable(); this._emitChange(); }
+    _deleteColumn(ci) { if (this.headers.length <= 1) return; this.headers.splice(ci, 1); for (const r of this.rows) r.splice(ci, 1); if (this.colWidths) this.colWidths.splice(ci, 1); if (this._selectedCol >= this.headers.length) this._selectedCol = this.headers.length - 1; this._renderTable(); this._emitChange(); }
     _deleteRow(ri) { if (this.rows.length <= 1) return; this.rows.splice(ri, 1); if (this._selectedRow >= this.rows.length) this._selectedRow = this.rows.length - 1; this._renderTable(); this._emitChange(); }
   }
 

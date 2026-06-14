@@ -179,6 +179,42 @@ body {
   pointer-events: none;
 }
 
+/* Blocks that differ from the last-saved baseline ("before/after" view).
+   A persistent gutter bar + tint mirrors VS Code's modified-line indicator,
+   so it's clear what changed but hasn't been saved yet. */
+.block.block-changed {
+  box-shadow: inset 3px 0 0 0 var(--vscode-editorGutter-modifiedBackground, #1b81a8);
+  background-color: rgba(27, 129, 168, 0.08);
+}
+
+.block.block-changed::after {
+  content: '未保存';
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--vscode-editorGutter-modifiedBackground, #1b81a8);
+  color: var(--vscode-editor-background, #1e1e1e);
+  opacity: 0.85;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* On hover the standard "edit" hint takes over the corner. */
+.block.block-changed:hover::after {
+  content: 'Enter / ダブルクリックで編集';
+  background: transparent;
+  color: var(--vscode-descriptionForeground, #888);
+  opacity: 0.7;
+}
+
+/* Don't show the badge while editing — it would overlap the inline editor. */
+.block.block-changed.editing::after {
+  display: none;
+}
+
 .block.editing {
   outline-color: var(--vscode-focusBorder, #007fd4);
   background-color: transparent;
@@ -189,6 +225,15 @@ body {
 .block.editing:hover::before,
 .block.editing:focus-visible::before {
   display: none;
+}
+
+.block.block-selected {
+  outline: 2px solid var(--vscode-focusBorder, #007fd4);
+  background-color: var(--vscode-editor-selectionBackground, rgba(38, 79, 120, 0.35));
+}
+
+.block.block-selected.editing {
+  background-color: transparent;
 }
 
 /* ===== Block Content (Rendered Markdown) ===== */
@@ -355,6 +400,28 @@ body {
 
 .mermaid-diagram svg {
   max-width: 100%;
+}
+
+/* Sankey diagrams: mermaid colors the labels with the link's own (often
+   dim) color, which becomes nearly invisible against a dark editor
+   background.  Force the editor foreground color so labels stay readable
+   regardless of theme.  The flow paths themselves are kept untouched. */
+.mermaid-diagram svg[aria-roledescription="sankey"] text,
+.dve-svg-area svg[aria-roledescription="sankey"] text,
+.mermaid-editor-preview-content svg[aria-roledescription="sankey"] text {
+  fill: var(--vscode-editor-foreground, #d4d4d4) !important;
+  stroke: none !important;
+  font-weight: 500;
+}
+/* Slight stroke around text gives it a halo so it stays legible even when
+   it sits on top of a colored flow band. */
+.mermaid-diagram svg[aria-roledescription="sankey"] text,
+.dve-svg-area svg[aria-roledescription="sankey"] text,
+.mermaid-editor-preview-content svg[aria-roledescription="sankey"] text {
+  paint-order: stroke;
+  stroke: var(--vscode-editor-background, #1e1e1e);
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
 
 .mermaid-edit-overlay {
@@ -1593,20 +1660,29 @@ body {
   width: 100%;
 }
 
+/* Fixed layout makes explicit column widths take effect and lets long cell
+   text wrap instead of overflowing. */
+.table-visual-editor table.tve-fixed {
+  table-layout: fixed;
+  width: auto;
+}
+
 .table-visual-editor th,
 .table-visual-editor td {
   border: 1px solid var(--vscode-editorWidget-border, #454545);
   padding: 0;
-  min-width: 80px;
+  min-width: 50px;
   position: relative;
+  vertical-align: top;
 }
 
 .table-visual-editor th {
   background-color: var(--vscode-editorWidget-background, #252526);
 }
 
-.table-visual-editor th input,
-.table-visual-editor td input {
+.table-visual-editor th .tve-cell,
+.table-visual-editor td .tve-cell {
+  display: block;
   width: 100%;
   padding: 5px 8px;
   border: none;
@@ -1614,14 +1690,47 @@ body {
   color: var(--vscode-input-foreground, #cccccc);
   font-size: 13px;
   font-family: inherit;
+  line-height: 1.4;
   outline: none;
   box-sizing: border-box;
+  resize: none;
+  overflow: hidden;
+  /* Wrap long text (including long words / URLs) within the cell. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
-.table-visual-editor th input:focus,
-.table-visual-editor td input:focus {
+.table-visual-editor th .tve-cell:focus,
+.table-visual-editor td .tve-cell:focus {
   background-color: rgba(0, 127, 212, 0.1);
   box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+}
+
+/* ── Column resize handle (edit-mode only) ── */
+.table-visual-editor th .col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.table-visual-editor th .col-resize-handle:hover,
+body.tve-col-resizing .table-visual-editor th .col-resize-handle {
+  background: var(--vscode-focusBorder, #007fd4);
+  opacity: 0.5;
+}
+/* While dragging a column border, force the resize cursor everywhere and
+   suppress text selection. */
+body.tve-col-resizing,
+body.tve-col-resizing * {
+  cursor: col-resize !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 .table-visual-editor .row-actions {
@@ -2481,6 +2590,27 @@ body {
   flex: 1 1 0;
   min-width: 0;
 }
+
+/* When the left pane shows a wide editable table (XY chart / Pie / Sankey
+   in 表で編集 モード), widen the panel so the table fits without forcing
+   a horizontal scrollbar, and push the SVG area accordingly. */
+.dve-body-table > .dve-list-panel,
+.dve-body-table-wide > .dve-list-panel {
+  width: 50%;
+  min-width: 360px;
+  max-width: 720px;
+}
+.dve-body-table > .dve-svg-area {
+  padding-left: clamp(372px, calc(50% + 12px), 732px);
+}
+.dve-body-table-wide > .dve-list-panel {
+  width: 60%;
+  min-width: 420px;
+  max-width: 900px;
+}
+.dve-body-table-wide > .dve-svg-area {
+  padding-left: clamp(432px, calc(60% + 12px), 912px);
+}
 .dve-highlighted {
   background-color: rgba(0, 127, 212, 0.18) !important;
   border-left: 3px solid var(--vscode-focusBorder, #007fd4) !important;
@@ -2959,40 +3089,140 @@ body {
   gap: 2px;
 }
 mark.search-highlight {
-  background: #ffd54f;
-  color: #000;
+  background: var(--vscode-editor-findMatchHighlightBackground, #ffd54f);
+  color: var(--vscode-editor-foreground, #000);
+  border: 1px solid var(--vscode-editor-findMatchHighlightBorder, transparent);
   padding: 0 1px;
   border-radius: 2px;
 }
 mark.search-highlight.current {
-  background: #ff9800;
-  outline: 2px solid #ff5722;
+  background: var(--vscode-editor-findMatchBackground, #ff9800);
+  color: var(--vscode-editor-foreground, #000);
+  outline: 2px solid var(--vscode-editor-findMatchBorder, #ff5722);
+}
+
+/* Light theme fallback — VS Code's findMatch* tokens are often translucent;
+   in light backgrounds the default yellow makes text invisible. Use a
+   stronger explicit color when the theme variables aren't present. */
+body.vscode-light mark.search-highlight,
+body.vscode-high-contrast-light mark.search-highlight,
+body.force-theme-light mark.search-highlight {
+  background: var(--vscode-editor-findMatchHighlightBackground, #fff3b0);
+  color: var(--vscode-editor-foreground, #1f1f1f);
+}
+body.vscode-light mark.search-highlight.current,
+body.vscode-high-contrast-light mark.search-highlight.current,
+body.force-theme-light mark.search-highlight.current {
+  background: var(--vscode-editor-findMatchBackground, #ffb74d);
+  color: var(--vscode-editor-foreground, #1f1f1f);
+  outline-color: var(--vscode-editor-findMatchBorder, #e65100);
 }
 
 /* SVG 内の検索ヒット強調（tspan 分割方式 / フォールバック共通） */
 tspan.svg-search-highlight {
-  fill: #000 !important;
+  fill: var(--vscode-editor-foreground, #000) !important;
   font-weight: bold;
-  /* paint-order: stroke fill; stroke で背景風の縁取りを付けて視認性を上げる */
   paint-order: stroke fill;
-  stroke: #ffd54f;
+  stroke: var(--vscode-editor-findMatchHighlightBackground, #ffd54f);
   stroke-width: 4px;
   stroke-linejoin: round;
 }
 text.svg-search-hit-fallback {
-  fill: #000 !important;
+  fill: var(--vscode-editor-foreground, #000) !important;
   font-weight: bold;
   paint-order: stroke fill;
-  stroke: #ffd54f;
+  stroke: var(--vscode-editor-findMatchHighlightBackground, #ffd54f);
   stroke-width: 4px;
   stroke-linejoin: round;
 }
 
-/* ===== Force Theme Overrides (preview light/dark toggle) ===== */
+/* ===== Block drag handle (reorder) ===== */
+.block-drag-handle {
+  position: absolute;
+  top: 50%;
+  left: -22px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--vscode-descriptionForeground, #888);
+  background-color: var(--vscode-editorWidget-background, rgba(127,127,127,0.10));
+  border: 1px solid transparent;
+  cursor: grab;
+  opacity: 0.45;
+  border-radius: 4px;
+  -webkit-user-select: none;
+  user-select: none;
+  z-index: 5;
+  transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
+}
+.block:hover > .block-drag-handle,
+.block:focus-within > .block-drag-handle {
+  opacity: 1;
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+.block-drag-handle:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.30));
+  opacity: 1 !important;
+}
+.block-drag-handle:active {
+  cursor: grabbing;
+}
+/* When the entire block is grabbable, hint with a move cursor on hover
+   (text/links still get their own cursors). */
+.block[draggable="true"]:not(.editing):hover {
+  cursor: move;
+}
+/* Hide the existing pseudo-element pencil so it doesn't overlap with the handle. */
+.block:hover::before,
+.block:focus-visible::before {
+  display: none;
+}
+.block.block-dragging {
+  opacity: 0.5;
+}
+.block.block-drop-before {
+  box-shadow: 0 -3px 0 0 var(--vscode-focusBorder, #007fd4) inset, 0 -3px 0 0 var(--vscode-focusBorder, #007fd4);
+  border-top: 2px solid var(--vscode-focusBorder, #007fd4);
+}
+.block.block-drop-after {
+  border-bottom: 2px solid var(--vscode-focusBorder, #007fd4);
+}
+
+/* ===== Image drop target ===== */
+.block.image-drop-target {
+  outline: 2px dashed var(--vscode-focusBorder, #007fd4);
+  background-color: var(--vscode-list-dropBackground, rgba(0,127,212,0.10));
+}
+
+/* ===== Image loading / error states ===== */
+.block-content img.image-loading {
+  opacity: 0.5;
+  outline: 1px dashed var(--vscode-descriptionForeground, #888);
+  min-width: 64px;
+  min-height: 32px;
+}
+.block-content img.image-error {
+  outline: 1px dashed var(--vscode-errorForeground, #f14c4c);
+  background: var(--vscode-inputValidation-errorBackground, rgba(190,17,0,0.10));
+}
+
+/* ===== Force Theme Overrides (preview light/dark toggle) =====
+   The toggle only repaints the WebView's own surface — VS Code itself stays
+   on whichever theme is active.  We therefore need to override enough VS Code
+   CSS variables to cover every chrome (toolbar, buttons, list panels,
+   diagram editors …) that the editor exposes.  Anything we miss falls back
+   to VS Code's actual theme palette and looks "stuck" in the opposite mode. */
 body.force-theme-light {
+  --vscode-foreground: #1f1f1f;
   --vscode-editor-background: #ffffff;
   --vscode-editor-foreground: #1f1f1f;
   --vscode-editorWidget-background: #f3f3f3;
+  --vscode-editorWidget-foreground: #1f1f1f;
   --vscode-editorWidget-border: #d0d0d0;
   --vscode-input-background: #ffffff;
   --vscode-input-foreground: #1f1f1f;
@@ -3000,14 +3230,53 @@ body.force-theme-light {
   --vscode-descriptionForeground: #555;
   --vscode-textBlockQuote-background: #f0f0f0;
   --vscode-textBlockQuote-border: #cccccc;
+  --vscode-textBlockQuote-foreground: #555;
   --vscode-textCodeBlock-background: rgba(0,0,0,0.05);
+  --vscode-textLink-foreground: #006ab1;
+  --vscode-textLink-activeForeground: #004f88;
+  --vscode-button-background: #007acc;
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-hoverBackground: #005a9e;
+  --vscode-button-secondaryBackground: #e7e7e7;
+  --vscode-button-secondaryForeground: #1f1f1f;
+  --vscode-button-secondaryHoverBackground: #d6d6d6;
+  --vscode-focusBorder: #0078d4;
+  --vscode-panel-border: #d0d0d0;
+  --vscode-panel-background: #f3f3f3;
+  --vscode-panelTitle-activeBorder: #0078d4;
+  --vscode-sideBar-background: #f3f3f3;
+  --vscode-sideBar-foreground: #1f1f1f;
+  --vscode-sideBar-border: #d0d0d0;
+  --vscode-list-hoverBackground: #e8e8e8;
+  --vscode-list-hoverForeground: #1f1f1f;
+  --vscode-list-activeSelectionBackground: #0060c0;
+  --vscode-list-activeSelectionForeground: #ffffff;
+  --vscode-list-inactiveSelectionBackground: #e4e6f1;
+  --vscode-list-inactiveSelectionForeground: #1f1f1f;
+  --vscode-scrollbarSlider-background: rgba(100,100,100,0.4);
+  --vscode-scrollbarSlider-hoverBackground: rgba(100,100,100,0.6);
+  --vscode-scrollbarSlider-activeBackground: rgba(0,0,0,0.6);
+  --vscode-errorForeground: #c4314b;
+  --vscode-inputValidation-errorBackground: rgba(232,17,35,0.10);
+  --vscode-inputValidation-errorBorder: #c4314b;
+  --vscode-dropdown-background: #ffffff;
+  --vscode-dropdown-foreground: #1f1f1f;
+  --vscode-dropdown-border: #c0c0c0;
+  --vscode-menu-background: #ffffff;
+  --vscode-menu-foreground: #1f1f1f;
+  --vscode-menu-selectionBackground: #0060c0;
+  --vscode-menu-selectionForeground: #ffffff;
+  --vscode-menu-border: #d0d0d0;
   background-color: #ffffff;
   color: #1f1f1f;
+  color-scheme: light;
 }
 body.force-theme-dark {
+  --vscode-foreground: #d4d4d4;
   --vscode-editor-background: #1e1e1e;
   --vscode-editor-foreground: #d4d4d4;
   --vscode-editorWidget-background: #252526;
+  --vscode-editorWidget-foreground: #d4d4d4;
   --vscode-editorWidget-border: #454545;
   --vscode-input-background: #3c3c3c;
   --vscode-input-foreground: #ffffff;
@@ -3015,9 +3284,46 @@ body.force-theme-dark {
   --vscode-descriptionForeground: #a0a0a0;
   --vscode-textBlockQuote-background: #2a2a2a;
   --vscode-textBlockQuote-border: #555;
+  --vscode-textBlockQuote-foreground: #a0a0a0;
   --vscode-textCodeBlock-background: rgba(255,255,255,0.06);
+  --vscode-textLink-foreground: #3794ff;
+  --vscode-textLink-activeForeground: #5fb1ff;
+  --vscode-button-background: #0e639c;
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-hoverBackground: #1177bb;
+  --vscode-button-secondaryBackground: #3a3d41;
+  --vscode-button-secondaryForeground: #ffffff;
+  --vscode-button-secondaryHoverBackground: #45494e;
+  --vscode-focusBorder: #007fd4;
+  --vscode-panel-border: #2b2b2b;
+  --vscode-panel-background: #1e1e1e;
+  --vscode-panelTitle-activeBorder: #007fd4;
+  --vscode-sideBar-background: #252526;
+  --vscode-sideBar-foreground: #d4d4d4;
+  --vscode-sideBar-border: #2b2b2b;
+  --vscode-list-hoverBackground: #2a2d2e;
+  --vscode-list-hoverForeground: #ffffff;
+  --vscode-list-activeSelectionBackground: #094771;
+  --vscode-list-activeSelectionForeground: #ffffff;
+  --vscode-list-inactiveSelectionBackground: #37373d;
+  --vscode-list-inactiveSelectionForeground: #ffffff;
+  --vscode-scrollbarSlider-background: rgba(121,121,121,0.4);
+  --vscode-scrollbarSlider-hoverBackground: rgba(100,100,100,0.7);
+  --vscode-scrollbarSlider-activeBackground: rgba(191,191,191,0.4);
+  --vscode-errorForeground: #f14c4c;
+  --vscode-inputValidation-errorBackground: rgba(190,17,0,0.10);
+  --vscode-inputValidation-errorBorder: #be1100;
+  --vscode-dropdown-background: #3c3c3c;
+  --vscode-dropdown-foreground: #f0f0f0;
+  --vscode-dropdown-border: #3c3c3c;
+  --vscode-menu-background: #252526;
+  --vscode-menu-foreground: #cccccc;
+  --vscode-menu-selectionBackground: #094771;
+  --vscode-menu-selectionForeground: #ffffff;
+  --vscode-menu-border: #454545;
   background-color: #1e1e1e;
   color: #d4d4d4;
+  color-scheme: dark;
 }
 
 /* ������ Editable table mode (XYChart / Pie / Sankey) �������������������������������������������������� */
@@ -3029,3 +3335,219 @@ body.force-theme-dark {
 .dve-cell-input:focus { background: var(--vscode-input-background, #3c3c3c); outline: 1px solid var(--vscode-focusBorder, #007fd4); }
 .dve-edit-table th .dve-cell-input { width: auto; min-width: 60px; }
 .dve-edit-table th .dve-icon-btn, .dve-edit-table td .dve-icon-btn { padding: 2px 6px; }
+
+/* ===== Print / PDF Export ===== */
+@media print {
+  @page { margin: 12mm; }
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  #topbar,
+  #toolbar,
+  #find-bar,
+  .heading-more-menu,
+  .dve-ctxmenu,
+  .confirm-dialog-overlay,
+  .block-drag-handle,
+  .mermaid-edit-overlay,
+  .mermaid-error-edit {
+    display: none !important;
+  }
+  #editor-container {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+  }
+  .block {
+    outline: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0.3em 0 !important;
+    cursor: default !important;
+    /* Allow tall blocks (images, mermaid, long tables) to break across
+       pages. Forcing `avoid` here produced large blank pages whenever a
+       block was taller than the remaining page space. */
+    page-break-inside: auto;
+    break-inside: auto;
+  }
+  .block:hover,
+  .block:focus-visible {
+    outline: none !important;
+    background: transparent !important;
+  }
+  /* Don't carry the unsaved-change highlight into printed / exported output. */
+  .block.block-changed {
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+  .block.block-changed::after {
+    display: none !important;
+  }
+  .block:hover::after,
+  .block:hover::before,
+  .block:focus-visible::before {
+    display: none !important;
+  }
+  .block.editing { outline: none !important; }
+  .block-content {
+    color: #000000 !important;
+  }
+  .block-content h1,
+  .block-content h2,
+  .block-content h3 {
+    page-break-after: avoid;
+    break-after: avoid;
+    border-bottom-color: #cccccc !important;
+  }
+  .block-content pre,
+  .block-content code {
+    background: #f5f5f5 !important;
+    color: #000000 !important;
+  }
+  .block-content blockquote {
+    color: #444 !important;
+    border-left-color: #999 !important;
+  }
+  .block-content a {
+    color: #1155cc !important;
+    text-decoration: underline;
+  }
+  .block-content table,
+  .block-content th,
+  .block-content td {
+    border-color: #888 !important;
+    color: #000 !important;
+  }
+  .block-content th {
+    background: #eaeaea !important;
+  }
+  .block-content img,
+  .mermaid-diagram svg {
+    max-width: 100% !important;
+    /* Cap visual height so a single tall image/diagram cannot create
+       multi-page blank gaps. */
+    max-height: 90vh !important;
+    height: auto !important;
+    object-fit: contain;
+  }
+  .mermaid-diagram {
+    background: transparent !important;
+    padding: 8px 0 !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+  /* Search highlights add visual noise on paper. */
+  mark.search-highlight,
+  mark.search-highlight.current {
+    background: transparent !important;
+    outline: none !important;
+    color: inherit !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+}
+
+/* While the user is initiating print(), force-light the entire UI so the
+   page is rendered for the print engine even before @media print kicks in. */
+body.printing #topbar,
+body.printing .block-drag-handle,
+body.printing .mermaid-edit-overlay,
+body.printing .mermaid-error-edit,
+body.printing .dve-ctxmenu,
+body.printing .block.block-changed::after {
+  display: none !important;
+}
+body.printing .block.block-changed {
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+/* ===== LaTeX / KaTeX ===== */
+.math-container { position: relative; }
+.math-display {
+  display: block;
+  overflow-x: auto;
+  padding: 8px 4px;
+  text-align: center;
+}
+.math-inline { display: inline-block; }
+
+/* ===== LaTeX 記号パレット (math editor) ===== */
+.math-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 6px 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--vscode-editorWidget-border, #454545);
+  border-radius: 4px;
+  background-color: var(--vscode-editorWidget-background, #252526);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.math-palette-hint {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #888);
+  padding: 2px 2px 4px;
+}
+.math-palette-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+}
+.math-palette-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground, #888);
+  min-width: 60px;
+  margin-right: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.math-palette-btn {
+  min-width: 30px;
+  min-height: 26px;
+  padding: 2px 8px;
+  font-size: 13px;
+  font-family: 'Cambria Math', 'Cambria', 'Georgia', serif;
+  background-color: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #cccccc);
+  border: 1px solid var(--vscode-input-border, #3c3c3c);
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1.2;
+  transition: background-color 0.10s, border-color 0.10s;
+}
+.math-palette-btn:hover {
+  background-color: var(--vscode-button-secondaryHoverBackground, #45494e);
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+.math-palette-btn:active {
+  background-color: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+.math-error {
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: var(--vscode-inputValidation-errorBackground, rgba(190,17,0,0.10));
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: 'Fira Code', 'Consolas', monospace;
+  cursor: help;
+}
+.math-fallback {
+  font-family: 'Fira Code', 'Consolas', monospace;
+  background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.15));
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.math-preview-content {
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Keep KaTeX color readable in dark themes (KaTeX defaults to inherit). */
+.katex { color: var(--vscode-editor-foreground, inherit); }

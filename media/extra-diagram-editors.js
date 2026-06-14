@@ -425,6 +425,11 @@
 
     _renderListAndPreview() {
       this._listPanel.innerHTML = '';
+      // Body modifier class — widen the left pane when the table editor is
+      // active so XY chart / Sankey / Pie tables don't get squeezed.
+      if (this._body && this._body.classList) {
+        this._body.classList.toggle('dve-body-table', !!this._tableMode && !this._codeMode);
+      }
       if (this._codeMode) {
         const ta = _el('textarea', 'dve-code-ta');
         ta.value = this._generate();
