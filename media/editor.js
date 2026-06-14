@@ -64,6 +64,12 @@
       case 'imageSaved':
         handleImageSaved(message);
         break;
+      case 'imageResolved':
+        handleImageResolved(message);
+        break;
+      case 'imageSaved':
+        handleImageSaved(message);
+        break;
     }
   });
 
