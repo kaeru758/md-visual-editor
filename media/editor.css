@@ -179,6 +179,42 @@ body {
   pointer-events: none;
 }
 
+/* Blocks that differ from the last-saved baseline ("before/after" view).
+   A persistent gutter bar + tint mirrors VS Code's modified-line indicator,
+   so it's clear what changed but hasn't been saved yet. */
+.block.block-changed {
+  box-shadow: inset 3px 0 0 0 var(--vscode-editorGutter-modifiedBackground, #1b81a8);
+  background-color: rgba(27, 129, 168, 0.08);
+}
+
+.block.block-changed::after {
+  content: '未保存';
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--vscode-editorGutter-modifiedBackground, #1b81a8);
+  color: var(--vscode-editor-background, #1e1e1e);
+  opacity: 0.85;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* On hover the standard "edit" hint takes over the corner. */
+.block.block-changed:hover::after {
+  content: 'Enter / ダブルクリックで編集';
+  background: transparent;
+  color: var(--vscode-descriptionForeground, #888);
+  opacity: 0.7;
+}
+
+/* Don't show the badge while editing — it would overlap the inline editor. */
+.block.block-changed.editing::after {
+  display: none;
+}
+
 .block.editing {
   outline-color: var(--vscode-focusBorder, #007fd4);
   background-color: transparent;
@@ -1624,20 +1660,29 @@ body {
   width: 100%;
 }
 
+/* Fixed layout makes explicit column widths take effect and lets long cell
+   text wrap instead of overflowing. */
+.table-visual-editor table.tve-fixed {
+  table-layout: fixed;
+  width: auto;
+}
+
 .table-visual-editor th,
 .table-visual-editor td {
   border: 1px solid var(--vscode-editorWidget-border, #454545);
   padding: 0;
-  min-width: 80px;
+  min-width: 50px;
   position: relative;
+  vertical-align: top;
 }
 
 .table-visual-editor th {
   background-color: var(--vscode-editorWidget-background, #252526);
 }
 
-.table-visual-editor th input,
-.table-visual-editor td input {
+.table-visual-editor th .tve-cell,
+.table-visual-editor td .tve-cell {
+  display: block;
   width: 100%;
   padding: 5px 8px;
   border: none;
@@ -1645,14 +1690,47 @@ body {
   color: var(--vscode-input-foreground, #cccccc);
   font-size: 13px;
   font-family: inherit;
+  line-height: 1.4;
   outline: none;
   box-sizing: border-box;
+  resize: none;
+  overflow: hidden;
+  /* Wrap long text (including long words / URLs) within the cell. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
-.table-visual-editor th input:focus,
-.table-visual-editor td input:focus {
+.table-visual-editor th .tve-cell:focus,
+.table-visual-editor td .tve-cell:focus {
   background-color: rgba(0, 127, 212, 0.1);
   box-shadow: inset 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+}
+
+/* ── Column resize handle (edit-mode only) ── */
+.table-visual-editor th .col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.table-visual-editor th .col-resize-handle:hover,
+body.tve-col-resizing .table-visual-editor th .col-resize-handle {
+  background: var(--vscode-focusBorder, #007fd4);
+  opacity: 0.5;
+}
+/* While dragging a column border, force the resize cursor everywhere and
+   suppress text selection. */
+body.tve-col-resizing,
+body.tve-col-resizing * {
+  cursor: col-resize !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 .table-visual-editor .row-actions {
@@ -3298,6 +3376,14 @@ body.force-theme-dark {
     outline: none !important;
     background: transparent !important;
   }
+  /* Don't carry the unsaved-change highlight into printed / exported output. */
+  .block.block-changed {
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+  .block.block-changed::after {
+    display: none !important;
+  }
   .block:hover::after,
   .block:hover::before,
   .block:focus-visible::before {
@@ -3368,8 +3454,13 @@ body.printing #topbar,
 body.printing .block-drag-handle,
 body.printing .mermaid-edit-overlay,
 body.printing .mermaid-error-edit,
-body.printing .dve-ctxmenu {
+body.printing .dve-ctxmenu,
+body.printing .block.block-changed::after {
   display: none !important;
+}
+body.printing .block.block-changed {
+  box-shadow: none !important;
+  background: transparent !important;
 }
 
 /* ===== LaTeX / KaTeX ===== */

@@ -12,6 +12,8 @@
   let preventBlurFinish = false;
   /** Whether mermaid is available */
   let mermaidAvailable = false;
+  /** Last-saved markdown (the "before" baseline for change highlighting). null until known. */
+  let baselineText = null;
 
   // ─── Global Error Handler ───
   window.addEventListener('error', (e) => {
@@ -48,6 +50,19 @@
         break;
       case 'saveStatus':
         updateSaveStatus(!!message.dirty);
+        // A non-dirty document means the on-disk content matches the editor:
+        // adopt it as the new "before" baseline so change highlights clear on
+        // save (and are established on first load).
+        if (!message.dirty) {
+          baselineText = getFullMarkdown();
+        }
+        updateChangedHighlights();
+        break;
+      case 'imageResolved':
+        handleImageResolved(message);
+        break;
+      case 'imageSaved':
+        handleImageSaved(message);
         break;
       case 'imageResolved':
         handleImageResolved(message);
@@ -572,6 +587,46 @@
   function sendEdit(text) {
     vscode.postMessage({ type: 'edit', text: text });
     updateSaveStatus(true);
+    updateChangedHighlights();
+  }
+
+  // ─── Change Highlighting (before/after vs last-saved baseline) ───
+  // VS Code's built-in diff doesn't reach this custom editor, so we surface
+  // which blocks differ from the last-saved content right in the visual view.
+  // Matching is by block raw text: a current block whose raw isn't present in
+  // the baseline (consuming one occurrence) is flagged as changed/added.
+  function buildBaselineRawCounts() {
+    if (baselineText == null) return null;
+    let toks;
+    // @ts-ignore
+    try { toks = marked.lexer(baselineText); } catch { return null; }
+    const counts = new Map();
+    for (const t of toks) {
+      if (t.type === 'space') continue;
+      counts.set(t.raw, (counts.get(t.raw) || 0) + 1);
+    }
+    return counts;
+  }
+
+  function updateChangedHighlights() {
+    const editor = document.getElementById('editor');
+    if (!editor) return;
+    const counts = buildBaselineRawCounts();
+    // Blocks appear in DOM order, which matches token order — consume baseline
+    // occurrences left-to-right so duplicate blocks match correctly.
+    const blocks = editor.querySelectorAll('.block[data-token-index]');
+    blocks.forEach((blockEl) => {
+      let changed = false;
+      if (counts) {
+        const idx = parseInt(blockEl.dataset.tokenIndex, 10);
+        const token = allTokens[idx];
+        const raw = token ? token.raw : undefined;
+        const remaining = raw !== undefined ? (counts.get(raw) || 0) : 0;
+        if (remaining > 0) { counts.set(raw, remaining - 1); }
+        else { changed = true; }
+      }
+      blockEl.classList.toggle('block-changed', changed);
+    });
   }
 
   // ─── Render ───
@@ -701,6 +756,8 @@
     requestAnimationFrame(() => renderMermaidDiagrams());
     // Resolve relative image paths via the host extension.
     requestAnimationFrame(() => resolveRenderedImages());
+    // Flag blocks that differ from the last-saved baseline.
+    updateChangedHighlights();
   }
 
   function renderBlockContent(container, token, index) {
@@ -2500,7 +2557,7 @@
 
     // Strip transient interactive affordances.
     clone.querySelectorAll('.block').forEach(b => {
-      b.classList.remove('editing', 'selected', 'search-current');
+      b.classList.remove('editing', 'selected', 'search-current', 'block-changed');
       b.removeAttribute('contenteditable');
       b.removeAttribute('tabindex');
     });
