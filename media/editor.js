@@ -425,6 +425,13 @@
     const list = document.createElement('div');
     list.className = 'insert-pos-list';
 
+    // If a block is currently selected, default the picker to "after that block"
+    // (use the last block in the selection). null = nothing selected.
+    const _sel = getSortedSelection();
+    const preselectIndex = _sel.length ? _sel[_sel.length - 1] : null;
+    /** @type {HTMLElement|null} the item to highlight + focus on open */
+    let preselectedEl = null;
+
     // "Insert at beginning" option
     const topItem = document.createElement('button');
     topItem.className = 'insert-pos-item insert-pos-top';
@@ -436,6 +443,10 @@
     for (const { token, index } of visibleTokens) {
       const item = document.createElement('button');
       item.className = 'insert-pos-item';
+      if (index === preselectIndex) {
+        item.classList.add('insert-pos-selected');
+        preselectedEl = item;
+      }
       let label = '';
       const raw = (token.raw || '').trim();
       if (token.type === 'heading') {
@@ -471,6 +482,12 @@
     overlay.appendChild(dialog);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
     document.body.appendChild(overlay);
+
+    // Focus the currently-selected block's entry so it is highlighted from the
+    // start and Enter confirms it. Fall back to the first option otherwise.
+    const focusTarget = preselectedEl || topItem;
+    focusTarget.focus({ preventScroll: true });
+    focusTarget.scrollIntoView({ block: 'nearest' });
   }
 
   function applyFormatting(textarea, action) {

@@ -1,5 +1,6 @@
 # Markdown Visual Editor
 
+[![Version 0.5.0](https://img.shields.io/badge/version-0.5.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![No Telemetry](https://img.shields.io/badge/telemetry-none-brightgreen.svg)](#privacy--security)
 [![100% Local](https://img.shields.io/badge/network-offline-blue.svg)](#privacy--security)
@@ -7,10 +8,11 @@
 [![LaTeX / KaTeX](https://img.shields.io/badge/LaTeX-KaTeX%200.17-329F00.svg)](https://katex.org/)
 [![VS Code ^1.80](https://img.shields.io/badge/VS%20Code-%5E1.80-007ACC.svg)](https://code.visualstudio.com/)
 
-> **EN:** A WYSIWYG Markdown editor for VS Code. Edit Markdown directly in its rendered preview, with **GUI editing for 21 Mermaid diagram types** (flowchart, sequence, class, ER, mindmap, gantt, quadrant, state, pie, journey, gitGraph, timeline, requirement, C4, sankey, xychart, block, ZenUML, packet, architecture, kanban), **LaTeX math (KaTeX)** for `$...$` / `$$...$$` / ` ```math ` blocks, and tables. **100% local** — no network calls, no telemetry, no authentication.
+> **EN:** A WYSIWYG Markdown editor for VS Code. Edit Markdown directly in its rendered preview, with **GUI editing for 21 Mermaid diagram types** (flowchart, sequence, class, ER, mindmap, gantt, quadrant, state, pie, journey, gitGraph, timeline, requirement, C4, sankey, xychart, block, ZenUML, packet, architecture, kanban), **LaTeX math (KaTeX)** for `$...$` / `$$...$$` / ` ```math ` blocks, and **GUI table editing** (cell-text wrapping, drag-to-resize columns). Unsaved blocks are highlighted live so you can see exactly what changed before saving. **100% local** — no network calls, no telemetry, no authentication.
 
 Markdown ファイルを **プレビュー表示のまま直接編集** できる VS Code 拡張機能です。  
-Mermaid ダイアグラム **21 種類** のビジュアル（GUI）編集、**LaTeX 数式 (KaTeX)** のインライン・ディスプレイレンダリング、テーブルの GUI 編集にも対応しています。
+Mermaid ダイアグラム **21 種類** のビジュアル（GUI）編集、**LaTeX 数式 (KaTeX)** のインライン・ディスプレイレンダリング、**テーブルの GUI 編集**（セル内折り返し・列幅のドラッグ調整）にも対応しています。  
+未保存のブロックはリアルタイムでハイライトされ、保存前に「どこを変えたか」を一目で確認できます。
 
 完全ローカル動作 — ネットワーク通信を一切行わず（KaTeX フォントも同梱）、テレメトリも送信しません。
 
@@ -234,6 +236,34 @@ $$
 
 > 詳しい操作方法は [利用者向けガイド](docs/USER-GUIDE.md) を参照してください。  
 > 各 Mermaid 種別ごとの対応マトリクスは [MERMAID-SUPPORT-MATRIX.md](docs/MERMAID-SUPPORT-MATRIX.md) にまとまっています。
+
+---
+
+## 既定エディタに設定する（`.md` を常にこのエディタで開く）
+
+本拡張はオプションエディタとして登録されているため、初期状態では `.md` ファイルは標準テキストエディタで開き、毎回「Open With...」で選ぶ必要があります。  
+すべての `.md` ファイルを **常に Markdown Visual Editor で開く** ようにするには、次のいずれかの方法で既定エディタに設定します。
+
+### 方法 A: GUI から設定（おすすめ）
+
+1. `.md` ファイルを右クリック →「**Open With...**」を選択
+2. 一覧の下部にある「**Configure default editor for '*.md'...**」（既定エディタを構成）をクリック
+3. 「**Markdown Visual Editor**」を選択
+
+以降、`.md` ファイルはダブルクリックで本エディタが開きます。
+
+### 方法 B: `settings.json` に直接記述
+
+コマンドパレット (`Ctrl+Shift+P`) →「**Preferences: Open User Settings (JSON)**」を開き、以下を追記します。
+
+```json
+"workbench.editorAssociations": {
+  "*.md": "mdVisualEditor.markdownEditor"
+}
+```
+
+> **元に戻すには:** 標準テキストエディタに戻したい場合は、上記の値を `"default"` に変更するか、`workbench.editorAssociations` から `*.md` の行を削除してください。  
+> 特定のファイルだけ一時的にテキストで開きたいときは、本エディタのツールバー右端「**📝 テキストで開く**」ボタンが使えます。
 
 ---
 
