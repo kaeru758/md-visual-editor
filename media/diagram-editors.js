@@ -2491,28 +2491,37 @@
     _doUndo() { const s = this._undo.undo(); if (s) { this._restoreSnapshot(s); this._render(true); } }
     _doRedo() { const s = this._undo.redo(); if (s) { this._restoreSnapshot(s); this._render(true); } }
     _parse(code) {
+      // Strip the surrounding double-quotes the editor emits around labels.
+      const unq = (s) => String(s == null ? '' : s).trim().replace(/^"([\s\S]*)"$/, '$1');
       const lines = code.split('\n');
       for (const line of lines) {
         const t = line.trim();
         if (!t || t === 'quadrantChart' || t.startsWith('%%')) continue;
-        const tm = t.match(/^title\s+(.+)$/); if (tm) { this.title = tm[1]; continue; }
+        const tm = t.match(/^title\s+(.+)$/); if (tm) { this.title = tm[1].trim(); continue; }
         const xm = t.match(/^x-axis\s+"?(.+?)"?\s+-->\s+"?(.+?)"?\s*$/); if (xm) { this.xAxisLeft = xm[1]; this.xAxisRight = xm[2]; continue; }
         const ym = t.match(/^y-axis\s+"?(.+?)"?\s+-->\s+"?(.+?)"?\s*$/); if (ym) { this.yAxisBottom = ym[1]; this.yAxisTop = ym[2]; continue; }
-        const q1 = t.match(/^quadrant-1\s+(.+)$/); if (q1) { this.quadrants[0] = q1[1]; continue; }
-        const q2 = t.match(/^quadrant-2\s+(.+)$/); if (q2) { this.quadrants[1] = q2[1]; continue; }
-        const q3 = t.match(/^quadrant-3\s+(.+)$/); if (q3) { this.quadrants[2] = q3[1]; continue; }
-        const q4 = t.match(/^quadrant-4\s+(.+)$/); if (q4) { this.quadrants[3] = q4[1]; continue; }
-        const pm = t.match(/^(.+?):\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]$/);
-        if (pm) this.points.push({ name: pm[1].trim(), x: parseFloat(pm[2]), y: parseFloat(pm[3]) });
+        const q1 = t.match(/^quadrant-1\s+(.+)$/); if (q1) { this.quadrants[0] = unq(q1[1]); continue; }
+        const q2 = t.match(/^quadrant-2\s+(.+)$/); if (q2) { this.quadrants[1] = unq(q2[1]); continue; }
+        const q3 = t.match(/^quadrant-3\s+(.+)$/); if (q3) { this.quadrants[2] = unq(q3[1]); continue; }
+        const q4 = t.match(/^quadrant-4\s+(.+)$/); if (q4) { this.quadrants[3] = unq(q4[1]); continue; }
+        // Point name may be double-quoted (any chars incl. ':' and full-width)
+        // or a bare token. Match the quoted form first.
+        const pm = t.match(/^(?:"([^"]*)"|(.+?))\s*:\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]$/);
+        if (pm) this.points.push({ name: (pm[1] !== undefined ? pm[1] : pm[2].trim()), x: parseFloat(pm[3]), y: parseFloat(pm[4]) });
       }
     }
     _generate() {
+      // Mermaid's quadrant lexer only accepts [A-Za-z]/\w for bare axis,
+      // quadrant and point labels, so non-ASCII text (e.g. Japanese) throws a
+      // parse error. Wrap labels in double-quotes — quoted strings accept any
+      // character except '"'. (title is read to end-of-line, so it's left bare.)
+      const q = (s) => '"' + String(s == null ? '' : s).replace(/"/g, '') + '"';
       const lines = ['quadrantChart'];
       if (this.title) lines.push('    title ' + this.title);
-      if (this.xAxisLeft || this.xAxisRight) lines.push('    x-axis ' + this.xAxisLeft + ' --> ' + this.xAxisRight);
-      if (this.yAxisBottom || this.yAxisTop) lines.push('    y-axis ' + this.yAxisBottom + ' --> ' + this.yAxisTop);
-      for (let i = 0; i < 4; i++) if (this.quadrants[i]) lines.push('    quadrant-' + (i + 1) + ' ' + this.quadrants[i]);
-      for (const p of this.points) lines.push('    ' + p.name + ': [' + p.x.toFixed(2) + ', ' + p.y.toFixed(2) + ']');
+      if (this.xAxisLeft || this.xAxisRight) lines.push('    x-axis ' + q(this.xAxisLeft) + ' --> ' + q(this.xAxisRight));
+      if (this.yAxisBottom || this.yAxisTop) lines.push('    y-axis ' + q(this.yAxisBottom) + ' --> ' + q(this.yAxisTop));
+      for (let i = 0; i < 4; i++) if (this.quadrants[i]) lines.push('    quadrant-' + (i + 1) + ' ' + q(this.quadrants[i]));
+      for (const p of this.points) lines.push('    ' + q(p.name) + ': [' + p.x.toFixed(2) + ', ' + p.y.toFixed(2) + ']');
       return lines.join('\n');
     }
     _buildUI() {
