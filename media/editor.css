@@ -402,6 +402,71 @@ body {
   max-width: 100%;
 }
 
+/* ── Mermaid preview: zoom / pan viewport ── */
+.mermaid-container.mermaid-zoomable {
+  overflow: hidden;
+  max-height: 70vh;
+  border-radius: 4px;
+}
+.mermaid-container.mermaid-zoomable .mermaid-diagram {
+  overflow: visible;
+  cursor: grab;
+  will-change: transform;
+}
+.mermaid-container.mermaid-zoomable.mermaid-panning .mermaid-diagram {
+  cursor: grabbing;
+}
+/* Zoomed content should not be capped to the viewport width. */
+.mermaid-container.mermaid-zoomable .mermaid-diagram svg {
+  max-width: none;
+}
+.mermaid-zoom-controls {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--vscode-editorWidget-background, #252526);
+  border: 1px solid var(--vscode-editorWidget-border, #454545);
+  border-radius: 5px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 3;
+  flex-wrap: wrap;
+  max-width: 90%;
+  justify-content: flex-end;
+}
+.mermaid-container.mermaid-zoomable:hover .mermaid-zoom-controls,
+.mermaid-zoom-controls:focus-within {
+  opacity: 1;
+}
+.mzc-btn {
+  min-width: 26px;
+  height: 24px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-foreground, #ccc);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.mzc-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, #3c3c3c);
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+.mzc-label {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #999);
+  min-width: 34px;
+  text-align: center;
+  padding: 0 2px;
+}
+
 /* Sankey diagrams: mermaid colors the labels with the link's own (often
    dim) color, which becomes nearly invisible against a dark editor
    background.  Force the editor foreground color so labels stay readable
@@ -2564,6 +2629,17 @@ body.tve-col-resizing * {
   color: var(--vscode-descriptionForeground, #999);
   vertical-align: middle;
   line-height: 24px;
+}
+.dve-pan-btn {
+  min-width: 24px;
+  font-size: 11px;
+}
+/* Middle-mouse panning feedback in a diagram editor's SVG area. */
+.dve-svg-area.dve-panning {
+  cursor: grabbing;
+}
+.dve-svg-area.dve-panning svg {
+  transition: none;
 }
 .dve-list-panel {
   position: absolute;

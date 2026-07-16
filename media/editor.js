@@ -933,6 +933,108 @@
     requestAnimationFrame(() => resolveRenderedImages(container));
   }
 
+  // ─── Mermaid preview zoom / pan ───
+  // Adds zoom (in/out/fit), directional pan buttons, Ctrl+wheel zoom and
+  // drag-to-pan to a rendered mermaid diagram in the (non-editing) preview.
+  // Idempotent: state lives on the `.mermaid-container`, so re-rendering the
+  // SVG keeps the current zoom/pan.
+  function attachMermaidPreviewZoomPan(container) {
+    if (!container) return;
+    const host = container.querySelector('.mermaid-diagram');
+    if (!host) return;
+    container.classList.add('mermaid-zoomable');
+
+    const clamp = (z) => Math.max(0.2, Math.min(4, z));
+    let st = container.__mzp;
+    const apply = () => {
+      host.style.transformOrigin = 'top center';
+      if (st.z === 1 && st.px === 0 && st.py === 0) {
+        host.style.transform = '';
+      } else {
+        host.style.transform = 'translate(' + st.px + 'px,' + st.py + 'px) scale(' + st.z + ')';
+      }
+      if (st.label) st.label.textContent = Math.round(st.z * 100) + '%';
+    };
+    const fit = () => {
+      st.px = 0; st.py = 0; st.z = 1;
+      host.style.transform = 'none';
+      const svg = host.querySelector('svg');
+      if (svg) {
+        const sr = svg.getBoundingClientRect();
+        const cr = container.getBoundingClientRect();
+        if (sr.width > 0 && sr.height > 0) {
+          const s = Math.min((cr.width - 16) / sr.width, (cr.height - 16) / sr.height);
+          st.z = clamp(s < 1 ? s : 1); // only shrink to fit; keep small diagrams at 100%
+        }
+      }
+      apply();
+    };
+
+    if (!st) {
+      st = { z: 1, px: 0, py: 0 };
+      container.__mzp = st;
+      st.fit = fit; st.apply = apply;
+
+      const ov = document.createElement('div');
+      ov.className = 'mermaid-zoom-controls';
+      const mk = (html, title, fn) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'mzc-btn'; b.innerHTML = html; b.title = title;
+        b.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); fn(); });
+        ov.appendChild(b);
+      };
+      mk('🔍+', '拡大 (Ctrl+ホイール↑)', () => { st.z = clamp(st.z + 0.2); apply(); });
+      mk('🔍−', '縮小 (Ctrl+ホイール↓)', () => { st.z = clamp(st.z - 0.2); apply(); });
+      mk('⊞', 'フィット', () => fit());
+      mk('◀', '左へ移動', () => { st.px += 60; apply(); });
+      mk('▶', '右へ移動', () => { st.px -= 60; apply(); });
+      mk('▲', '上へ移動', () => { st.py += 60; apply(); });
+      mk('▼', '下へ移動', () => { st.py -= 60; apply(); });
+      st.label = document.createElement('span');
+      st.label.className = 'mzc-label'; st.label.textContent = '100%';
+      ov.appendChild(st.label);
+      container.appendChild(ov);
+
+      // Ctrl + wheel to zoom.
+      container.addEventListener('wheel', (e) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        st.z = clamp(st.z + (e.deltaY < 0 ? 0.2 : -0.2));
+        apply();
+      }, { passive: false });
+
+      // Drag to pan (pointer capture avoids document-level listener leaks).
+      let panning = false, sx = 0, sy = 0, ox = 0, oy = 0;
+      host.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        panning = true; sx = e.clientX; sy = e.clientY; ox = st.px; oy = st.py;
+        container.classList.add('mermaid-panning');
+        try { host.setPointerCapture(e.pointerId); } catch (_e) { /* */ }
+      });
+      host.addEventListener('pointermove', (e) => {
+        if (!panning) return;
+        st.px = ox + (e.clientX - sx); st.py = oy + (e.clientY - sy); apply();
+      });
+      const endPan = (e) => {
+        if (!panning) return;
+        panning = false; container.classList.remove('mermaid-panning');
+        try { host.releasePointerCapture(e.pointerId); } catch (_e) { /* */ }
+      };
+      host.addEventListener('pointerup', endPan);
+      host.addEventListener('pointercancel', endPan);
+
+      // Auto-fit on first render when the diagram overflows the viewport.
+      requestAnimationFrame(() => {
+        const svg = host.querySelector('svg');
+        if (!svg) return;
+        const sr = svg.getBoundingClientRect(), cr = container.getBoundingClientRect();
+        if (sr.height > cr.height + 4 || sr.width > cr.width + 4) fit();
+      });
+    } else {
+      apply();
+    }
+  }
+
   async function renderMermaidDiagrams() {
     if (!mermaidAvailable) return;
     const diagrams = document.querySelectorAll('.mermaid-diagram[data-mermaid-code]');
@@ -945,6 +1047,7 @@
         // @ts-ignore
         const { svg } = await mermaid.render(rendererId, code);
         el.innerHTML = svg;
+        attachMermaidPreviewZoomPan(el.closest('.mermaid-container'));
       } catch (err) {
         el.innerHTML = '<div class="mermaid-error">Mermaid構文エラー:\n' +
           escapeHtml(err.message || String(err)) + '</div>' +
