@@ -659,6 +659,14 @@ body {
   background: var(--vscode-list-hoverBackground, #2a2d2e);
   border-color: var(--vscode-focusBorder, #007fd4);
 }
+.insert-pos-item.insert-pos-selected {
+  background: var(--vscode-list-activeSelectionBackground, #094771);
+  color: var(--vscode-list-activeSelectionForeground, #fff);
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+.insert-pos-item.insert-pos-selected .insert-pos-icon {
+  opacity: 1;
+}
 .insert-pos-item.insert-pos-top {
   border-bottom: 1px solid var(--vscode-editorWidget-border, #454545);
   margin-bottom: 4px;

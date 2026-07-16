@@ -405,6 +405,13 @@
     title.textContent = '挿入位置を選択';
     dialog.appendChild(title);
 
+    // If a block is currently selected, default the picker to "after that block"
+    // (use the last block in the selection). null = nothing selected.
+    const _sel = getSortedSelection();
+    const preselectIndex = _sel.length ? _sel[_sel.length - 1] : null;
+    /** @type {HTMLElement|null} the item to highlight + focus on open */
+    let preselectedEl = null;
+
     const list = document.createElement('div');
     list.className = 'insert-pos-list';
 
@@ -440,6 +447,10 @@
       }
       item.innerHTML = '<span class="insert-pos-icon">↓</span><span class="insert-pos-label">' + escapeHtml(label) + ' の後に挿入</span>';
       item.addEventListener('click', () => { overlay.remove(); callback(index); });
+      if (index === preselectIndex) {
+        item.classList.add('insert-pos-selected');
+        preselectedEl = item;
+      }
       list.appendChild(item);
     }
 
@@ -454,6 +465,12 @@
     overlay.appendChild(dialog);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
     document.body.appendChild(overlay);
+
+    // Focus the currently-selected block's entry so it is highlighted from the
+    // start and Enter confirms it. Fall back to the first option otherwise.
+    const focusTarget = preselectedEl || topItem;
+    focusTarget.focus({ preventScroll: true });
+    focusTarget.scrollIntoView({ block: 'nearest' });
   }
 
   function applyFormatting(textarea, action) {
@@ -940,16 +957,16 @@
             () => {
               // Restore original then finish (which writes back the now-restored value)
               textarea.value = originalText;
-              finishEditing();
+              finishEditing(true);
             },
             { okLabel: '破棄', cancelLabel: '編集を続ける', danger: true }
           );
         } else {
-          finishEditing();
+          finishEditing(true);
         }
       } else if (e.key === 'Enter' && e.ctrlKey) {
         e.preventDefault();
-        finishEditing();
+        finishEditing(true);
       } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.altKey) {
         // Commit this block and jump straight into editing the adjacent one.
         e.preventDefault();
@@ -980,7 +997,9 @@
     });
   }
 
-  function finishEditing() {
+  // `restoreFocus` (keyboard-initiated finish): keep the block selected and
+  // focused so the user can keep navigating (↑/↓, Enter) without the mouse.
+  function finishEditing(restoreFocus) {
     if (editingBlockIndex < 0) return;
 
     // Clean up visual editor if active
@@ -1015,6 +1034,12 @@
     }
 
     sendEdit(getFullMarkdown());
+
+    if (restoreFocus) {
+      replaceBlockSelection([tokenIndex]);
+      blockEl.focus();
+      blockEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
   }
 
   /** Active visual editor instance (if any) */
@@ -2394,14 +2419,17 @@
   }
 
   // ─── Keyboard navigation between blocks ───
-  /** Move DOM focus to the previous/next visible block (dir: -1 | +1). */
+  /** Move DOM focus + selection to the previous/next visible block (dir: -1 | +1). */
   function focusAdjacentBlock(tokenIndex, dir) {
     const visible = _visibleBlockIndices();
     const pos = visible.indexOf(tokenIndex);
     if (pos < 0) return;
     const targetPos = pos + dir;
     if (targetPos < 0 || targetPos >= visible.length) return;
-    const el = document.querySelector('[data-token-index="' + visible[targetPos] + '"]');
+    const targetIndex = visible[targetPos];
+    // Keep the selection in sync so the current block stays highlighted.
+    replaceBlockSelection([targetIndex]);
+    const el = document.querySelector('[data-token-index="' + targetIndex + '"]');
     if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
   }
 
@@ -2416,6 +2444,7 @@
     // finishEditing() only rewrites the current block's raw and re-renders that
     // single block, so token indices stay valid for the follow-up startEditing.
     finishEditing();
+    replaceBlockSelection([targetIndex]);
     startEditing(targetIndex);
   }
 
