@@ -5,15 +5,14 @@
 ---
 ![disney_40th](images/disney_40th.jpg)
 ## 0. テスト前の確認
-
 - [ ] VS Code 1.80.0 以上
 - [ ] 拡張機能 `md-visual-editor-0.4.1.vsix` がインストール済み
 - [ ] このファイルを「Markdown Visual Editor」で開けている（タブのアイコンがプレビュー表示になっていること）
 
+
 ---
 
 ## 1. WYSIWYG ブロック編集 — 基本
-
 このセクションの各ブロックを **ダブルクリック** して編集モードに入り、`Escape` または `Ctrl + Enter` で確定してください。
 
 ### 段落
@@ -24,9 +23,6 @@
 - [ ] 段落をダブルクリックで編集できる
 - [ ] `Escape` で確定 / `Ctrl + Enter` で確定 / 他ブロックのクリックで確定
 - [ ] 編集中の背景色が VS Code エディタ色に **変化しない**（v0.3.1 の修正点）
-
-### 見出し
-
 # 見出し H1
 ## 見出し H2
 ### 見出し H3
@@ -165,19 +161,23 @@ function hello(name) {
 ### 5.1 フローチャート
 
 ```mermaid
-flowchart TB
-    Start([開始]) --> Input[/入力/]
-    Input --> Decision{条件分岐}
-    Decision -->|Yes| Process[処理 A]
-    Decision -->|No| Skip[処理 B]
-    Process --> End([終了])
-    Skip --> End
-
-    subgraph 前処理
-        Input
-        Decision
+graph TD
+    Start([開始])
+    Input[/入力/]
+    Decision{条件分岐}
+    Process[処理 A]
+    Skip[処理 B]
+    End([終了])
+    subgraph SG0[前処理]
     end
+    Start --> Input
+    Input --> Decision
+    Decision -->|Yes| Process
+    Decision -->|No| Skip
+    Process --> End
+    Skip --> End
 ```
+
 
 - [ ] ノード追加・編集・削除（形状: 矩形・角丸・ひし形・円形 等）
 - [ ] エッジの追加（接続元 → 接続先）
@@ -428,11 +428,12 @@ C4Context
 
 ```mermaid
 sankey-beta
-Source A,Target X,10
-Source A,Target Y,5
-Source B,Target X,7
-Source B,Target Z,3
+"Source A","Target X",10
+"Source A","Target Y",5
+"Source B","Target X",7
+"Source B","Target Z",3
 ```
+
 
 ### 6.9 XY チャート
 
@@ -444,6 +445,7 @@ xychart-beta
     bar [5000, 6000, 7500, 8200, 9500]
     line [5000, 6000, 7500, 8200, 9500]
 ```
+
 
 ### 6.10 ブロック図
 
@@ -656,7 +658,6 @@ $$
 - [ ] 検証 OS は Windows 10/11 のみ
 
 ---
-
 ## チェック完了サイン
 
 ```
