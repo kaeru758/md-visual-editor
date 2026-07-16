@@ -744,9 +744,11 @@
     _blockRanges = ranges;
     ranges.forEach((range) => {
       const index = range.start;
-      // Section blocks stitch their tokens' markdown back together; single /
-      // special tokens keep their own token so dedicated editors still work.
-      const rep = (range.end - range.start === 1)
+      // Special blocks (table / code incl. Mermaid & math) always render via
+      // their own token so their dedicated branch + editors fire — even when a
+      // trailing blank line makes the range span 2 tokens. Multi-token text
+      // sections render their stitched-together markdown.
+      const rep = (_isSpecialTokenType(allTokens[index]) || range.end - range.start === 1)
         ? allTokens[index]
         : { type: 'section', raw: rawOfRange(range) };
 

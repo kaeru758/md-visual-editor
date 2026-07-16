@@ -281,7 +281,7 @@ ext install <publisher>.md-visual-editor
 ### VSIX ファイルからインストール
 
 ```powershell
-code --install-extension md-visual-editor-0.5.5.vsix
+code --install-extension md-visual-editor-0.5.6.vsix
 ```
 
 または VS Code のコマンドパレット (`Ctrl+Shift+P`) で「**Extensions: Install from VSIX...**」を選択し、`.vsix` ファイルを指定してください。
