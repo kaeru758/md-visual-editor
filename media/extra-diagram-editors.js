@@ -360,6 +360,12 @@
       this._body.appendChild(this._svgArea);
       this.container.appendChild(this._body);
 
+      // Zoom / pan for the preview SVG (shared mixin from diagram-editors.js).
+      if (window.DiagramZoom) {
+        window.DiagramZoom.init(this);
+        window.DiagramZoom.attachWheel(this);
+      }
+
       // Unified keyboard shortcuts
       attachKeyHandlers(this.container, {
         onDelete: (item) => {
@@ -419,6 +425,9 @@
 
       // Add click-to-connect button if subclass opted in
       this._maybeAddConnectButton();
+
+      // Zoom / pan controls (re-added since the toolbar was rebuilt above).
+      if (window.DiagramZoom) window.DiagramZoom.addControls(this._toolbar, this);
 
       this._renderListAndPreview();
     }
@@ -519,6 +528,8 @@
           this._svgArea.innerHTML = svg;
           // Attach click-to-connect handlers after render if enabled
           this._maybeAttachSvgConnect();
+          // Apply / fit zoom for the freshly rendered SVG.
+          if (window.DiagramZoom) window.DiagramZoom.postRender(this);
         }).catch((err) => {
           if (token !== this._renderToken) return;
           this._svgArea.innerHTML = '<div class="mermaid-error">プレビューエラー:\n' + _esc(err.message || err) + '</div>';

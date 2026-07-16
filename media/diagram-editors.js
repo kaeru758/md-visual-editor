@@ -193,6 +193,8 @@
     editor._zoomMin = 0.2;
     editor._zoomMax = 3.0;
     editor._zoomStep = 0.15;
+    editor._panX = 0;
+    editor._panY = 0;
     editor._initialRender = true;
   }
 
@@ -217,6 +219,23 @@
     zoomFitBtn.addEventListener('click', () => _zoomFit(editor));
     section.appendChild(zoomFitBtn);
 
+    // Directional pan buttons (move the diagram up/down/left/right).
+    const panStep = 60;
+    const mkPan = (label, dx, dy, title) => {
+      const b = _el('button', 'mve-tool-btn dve-zoom-btn dve-pan-btn');
+      b.textContent = label; b.title = title;
+      b.addEventListener('click', () => {
+        editor._panX = (editor._panX || 0) + dx;
+        editor._panY = (editor._panY || 0) + dy;
+        _applyZoom(editor);
+      });
+      section.appendChild(b);
+    };
+    mkPan('◀', panStep, 0, '左へ移動');
+    mkPan('▶', -panStep, 0, '右へ移動');
+    mkPan('▲', 0, panStep, '上へ移動');
+    mkPan('▼', 0, -panStep, '下へ移動');
+
     editor._zoomLabel = _elText('span', '100%', 'dve-zoom-label');
     section.appendChild(editor._zoomLabel);
 
@@ -225,26 +244,49 @@
 
   function _attachZoomWheel(editor) {
     if (!editor._svgArea) return;
-    editor._svgArea.addEventListener('wheel', (e) => {
+    const area = editor._svgArea;
+    area.addEventListener('wheel', (e) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
       if (e.deltaY < 0) _zoomIn(editor); else _zoomOut(editor);
     }, { passive: false });
+    // Middle-mouse drag to pan — never conflicts with left-click node editing.
+    let panning = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    area.addEventListener('mousedown', (e) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      panning = true; sx = e.clientX; sy = e.clientY;
+      ox = editor._panX || 0; oy = editor._panY || 0;
+      area.classList.add('dve-panning');
+    });
+    const onMove = (e) => {
+      if (!panning) return;
+      editor._panX = ox + (e.clientX - sx);
+      editor._panY = oy + (e.clientY - sy);
+      _applyZoom(editor);
+    };
+    const onUp = () => { if (panning) { panning = false; area.classList.remove('dve-panning'); } };
+    area.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    // Remember so destroy() could remove them (best-effort; editors are few).
+    editor._panCleanup = () => { area.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }
 
   function _applyZoom(editor) {
     const svg = editor._svgArea ? editor._svgArea.querySelector('svg') : null;
     if (!svg) return;
-    if (editor._zoomLevel === 1.0) {
+    const z = editor._zoomLevel;
+    const px = editor._panX || 0, py = editor._panY || 0;
+    if (z === 1.0 && px === 0 && py === 0) {
       svg.style.transform = '';
       svg.style.maxWidth = '100%';
     } else {
       svg.style.maxWidth = 'none';
-      svg.style.transform = 'scale(' + editor._zoomLevel + ')';
+      svg.style.transform = 'translate(' + px + 'px,' + py + 'px) scale(' + z + ')';
     }
     svg.style.transformOrigin = 'top center';
     if (editor._zoomLabel) {
-      editor._zoomLabel.textContent = Math.round(editor._zoomLevel * 100) + '%';
+      editor._zoomLabel.textContent = Math.round(z * 100) + '%';
     }
   }
 
@@ -259,6 +301,9 @@
   }
 
   function _zoomFit(editor) {
+    // Recenter when fitting.
+    editor._panX = 0;
+    editor._panY = 0;
     const svg = editor._svgArea ? editor._svgArea.querySelector('svg') : null;
     if (!svg) { editor._zoomLevel = 1.0; _applyZoom(editor); return; }
     svg.style.transform = 'none';
@@ -303,6 +348,17 @@
       _applyZoom(editor);
     }
   }
+
+  // Expose the zoom/pan mixin so editors in other files (extra-diagram-editors)
+  // can reuse the exact same zoom + pan behavior on their SVG areas.
+  window.DiagramZoom = {
+    init: _initZoom,
+    addControls: _addZoomControls,
+    attachWheel: _attachZoomWheel,
+    apply: _applyZoom,
+    fit: _zoomFit,
+    postRender: _postRenderZoom,
+  };
 
   // ═══════════════════════════════════════════════════════════════
   //  UNDO STACK — Shared undo/redo for all diagram editors
