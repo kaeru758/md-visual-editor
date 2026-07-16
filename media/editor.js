@@ -6,6 +6,8 @@
   let allTokens = [];
   /** Index in allTokens of the block being edited (-1 = none) */
   let editingBlockIndex = -1;
+  /** Token range {start,end} of the section/text block being edited (null = special/none) */
+  let _editingRange = null;
   /** Counter for unique mermaid element IDs */
   let mermaidCounter = 0;
   /** Flag to prevent blur-triggered finish when toolbar is clicked */
@@ -382,8 +384,12 @@
   }
 
   function showInsertPositionPicker(callback) {
-    const visibleTokens = [];
-    allTokens.forEach((t, i) => { if (t.type !== 'space') visibleTokens.push({ token: t, index: i }); });
+    // One entry per visual block (H1/H2 section or special block). `index` is
+    // the block's start token (for preselect matching); `after` is the token to
+    // insert after (its last token).
+    const visibleTokens = computeBlockRanges().map(r => ({
+      token: allTokens[r.start], index: r.start, after: r.end - 1,
+    }));
 
     // If document is empty, insert at position 0
     if (visibleTokens.length === 0) {
@@ -423,11 +429,11 @@
     list.appendChild(topItem);
 
     // Options for after each visible block
-    for (const { token, index } of visibleTokens) {
+    for (const { token, index, after } of visibleTokens) {
       const item = document.createElement('button');
       item.className = 'insert-pos-item';
       let label = '';
-      const raw = (token.raw || '').trim();
+      const raw = rawOfRange(rangeOf(index)).trim();
       if (token.type === 'heading') {
         label = '#'.repeat(token.depth) + ' ' + token.text;
       } else if (token.type === 'paragraph') {
@@ -446,7 +452,7 @@
         label = raw.length > 50 ? raw.substring(0, 50) + '…' : raw || token.type;
       }
       item.innerHTML = '<span class="insert-pos-icon">↓</span><span class="insert-pos-label">' + escapeHtml(label) + ' の後に挿入</span>';
-      item.addEventListener('click', () => { overlay.remove(); callback(index); });
+      item.addEventListener('click', () => { overlay.remove(); callback(after); });
       if (index === preselectIndex) {
         item.classList.add('insert-pos-selected');
         preselectedEl = item;
@@ -600,10 +606,11 @@
     let toks;
     // @ts-ignore
     try { toks = marked.lexer(baselineText); } catch { return null; }
+    // Group baseline into the same H1/H2 section blocks and count their raws.
     const counts = new Map();
-    for (const t of toks) {
-      if (t.type === 'space') continue;
-      counts.set(t.raw, (counts.get(t.raw) || 0) + 1);
+    for (const r of computeBlockRanges(toks)) {
+      const raw = rawOfRange(r, toks);
+      counts.set(raw, (counts.get(raw) || 0) + 1);
     }
     return counts;
   }
@@ -618,15 +625,72 @@
     blocks.forEach((blockEl) => {
       let changed = false;
       if (counts) {
-        const idx = parseInt(blockEl.dataset.tokenIndex, 10);
-        const token = allTokens[idx];
-        const raw = token ? token.raw : undefined;
+        const start = parseInt(blockEl.dataset.tokenIndex, 10);
+        const end = parseInt(blockEl.dataset.tokenEnd, 10);
+        const raw = (!isNaN(start) && !isNaN(end)) ? rawOfRange({ start, end }) : undefined;
         const remaining = raw !== undefined ? (counts.get(raw) || 0) : 0;
         if (remaining > 0) { counts.set(raw, remaining - 1); }
         else { changed = true; }
       }
       blockEl.classList.toggle('block-changed', changed);
     });
+  }
+
+  // ─── Block grouping (H1/H2 sections) ───
+  // Text tokens (headings, paragraphs, lists, blockquotes…) are grouped into a
+  // single editable block per H1/H2 section. Tables and code blocks (incl.
+  // Mermaid / math) stay as their own blocks so their dedicated visual editors
+  // still apply. A "block" is a contiguous token range [start, end).
+  let _blockRanges = [];
+  function _isSpecialTokenType(t) {
+    return !!t && (t.type === 'table' || t.type === 'code');
+  }
+  function computeBlockRanges(tokens) {
+    tokens = tokens || allTokens;
+    const ranges = [];
+    const n = tokens.length;
+    let i = 0;
+    while (i < n) {
+      const t = tokens[i];
+      if (t.type === 'space') {
+        // Absorb a trailing/standalone blank line into the previous block.
+        if (ranges.length) ranges[ranges.length - 1].end = i + 1;
+        i++;
+        continue;
+      }
+      if (_isSpecialTokenType(t)) {
+        ranges.push({ start: i, end: i + 1 });
+        i++;
+        if (i < n && tokens[i].type === 'space') { ranges[ranges.length - 1].end = i + 1; i++; }
+        continue;
+      }
+      // A text section runs until the next H1/H2 heading, a special block, or EOF.
+      const start = i;
+      i++;
+      while (i < n) {
+        const tt = tokens[i];
+        if (tt.type === 'space') { i++; continue; }
+        if (_isSpecialTokenType(tt)) break;
+        if (tt.type === 'heading' && tt.depth <= 2) break;
+        i++;
+      }
+      ranges.push({ start, end: i });
+    }
+    return ranges;
+  }
+  function rawOfRange(range, tokens) {
+    tokens = tokens || allTokens;
+    let s = '';
+    for (let i = range.start; i < range.end && i < tokens.length; i++) s += (tokens[i].raw || '');
+    return s;
+  }
+  /** Range (in allTokens) of the block that starts at token index `startIdx`. */
+  function rangeOf(startIdx) {
+    const ranges = computeBlockRanges();
+    for (const r of ranges) if (r.start === startIdx) return r;
+    // Fallback: single token (or the block that contains startIdx).
+    for (const r of ranges) if (startIdx >= r.start && startIdx < r.end) return r;
+    return { start: startIdx, end: Math.min(startIdx + 1, allTokens.length) };
   }
 
   // ─── Render ───
@@ -676,15 +740,23 @@
       return;
     }
 
-    allTokens.forEach((token, index) => {
-      if (token.type === 'space') return;
+    const ranges = computeBlockRanges();
+    _blockRanges = ranges;
+    ranges.forEach((range) => {
+      const index = range.start;
+      // Section blocks stitch their tokens' markdown back together; single /
+      // special tokens keep their own token so dedicated editors still work.
+      const rep = (range.end - range.start === 1)
+        ? allTokens[index]
+        : { type: 'section', raw: rawOfRange(range) };
 
       const block = document.createElement('div');
       block.className = 'block';
       block.dataset.tokenIndex = String(index);
+      block.dataset.tokenEnd = String(range.end);
       block.tabIndex = 0;
       block.setAttribute('role', 'group');
-      block.setAttribute('aria-label', 'ブロック (' + (token.type || 'text') + ')');
+      block.setAttribute('aria-label', 'ブロック (' + (rep.type || 'text') + ')');
 
       // Drag handle for reordering (visible on hover)
       const handle = document.createElement('div');
@@ -702,7 +774,7 @@
       block.setAttribute('draggable', 'true');
       attachBlockSelfDragSource(block);
 
-      renderBlockContent(block, token, index);
+      renderBlockContent(block, rep, index);
 
       block.addEventListener('dblclick', (e) => {
         if (e.target.tagName === 'A') return;
@@ -902,6 +974,7 @@
     }
 
     editingBlockIndex = tokenIndex;
+    _editingRange = null;
     const token = allTokens[tokenIndex];
     const blockEl = document.querySelector('[data-token-index="' + tokenIndex + '"]');
     if (!blockEl) return;
@@ -924,8 +997,11 @@
 
     blockEl.classList.add('editing');
 
-    // Remove trailing newline for nicer editing
-    const rawText = token.raw.replace(/\n$/, '');
+    // Section/text block: edit the whole H1/H2 section's markdown at once.
+    const range = rangeOf(tokenIndex);
+    _editingRange = range;
+    // Remove trailing newline(s) for nicer editing
+    const rawText = rawOfRange(range).replace(/\n+$/, '');
     // Snapshot original text for dirty-check on cancel
     const originalText = rawText;
 
@@ -1006,30 +1082,55 @@
     destroyVisualEditor();
 
     const tokenIndex = editingBlockIndex;
-    const token = allTokens[tokenIndex];
+    const range = _editingRange;
     const blockEl = document.querySelector('[data-token-index="' + tokenIndex + '"]');
 
     if (!blockEl) {
       editingBlockIndex = -1;
+      _editingRange = null;
       return;
     }
 
     const textarea = blockEl.querySelector('textarea');
-    if (textarea) {
+
+    // Section / text block: re-lex the edited markdown and splice it back in
+    // place, then re-render fully (its block structure may have changed).
+    if (range && textarea) {
       let newRaw = textarea.value;
-      if (!newRaw.endsWith('\n')) {
-        newRaw += '\n';
+      if (!newRaw.endsWith('\n')) newRaw += '\n';
+      const before = allTokens.slice(0, range.start).map(t => t.raw).join('');
+      const after = allTokens.slice(range.end).map(t => t.raw).join('');
+      const fullText = before + newRaw + after;
+      editingBlockIndex = -1;
+      _editingRange = null;
+      sendEdit(fullText);
+      handleDocumentUpdate(fullText);
+      if (restoreFocus) {
+        const el = document.querySelector('[data-token-index="' + range.start + '"]');
+        if (el) {
+          replaceBlockSelection([range.start]);
+          el.focus();
+          el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
       }
+      return;
+    }
+
+    // Legacy single-token path (special blocks cleaned up above have no textarea).
+    const token = allTokens[tokenIndex];
+    if (textarea && token) {
+      let newRaw = textarea.value;
+      if (!newRaw.endsWith('\n')) newRaw += '\n';
       token.raw = newRaw;
     }
 
     editingBlockIndex = -1;
+    _editingRange = null;
 
-    // Re-render the block as preview
     blockEl.classList.remove('editing');
-    renderBlockContent(blockEl, token, tokenIndex);
+    if (token) renderBlockContent(blockEl, token, tokenIndex);
 
-    if (token.type === 'code' && token.lang === 'mermaid') {
+    if (token && token.type === 'code' && token.lang === 'mermaid') {
       requestAnimationFrame(() => renderMermaidDiagrams());
     }
 
@@ -2202,7 +2303,7 @@
       e.preventDefault();
       e.stopPropagation();
       block.classList.remove('image-drop-target');
-      handleDroppedFiles(files, index);
+      handleDroppedFiles(files, rangeOf(index).end - 1);
     });
   }
 
@@ -2255,9 +2356,8 @@
       return;
     }
 
-    // Find sibling visible (non-space) blocks so move-up/down are sensible.
-    const visibleIdx = [];
-    allTokens.forEach((t, i) => { if (t.type !== 'space') visibleIdx.push(i); });
+    // Find sibling blocks so move-up/down are sensible.
+    const visibleIdx = _visibleBlockIndices();
     const orderPos = visibleIdx.indexOf(tokenIndex);
     const canUp = orderPos > 0;
     const canDown = orderPos >= 0 && orderPos < visibleIdx.length - 1;
@@ -2337,9 +2437,9 @@
     return null;
   }
   function copyBlockToClipboard(tokenIndex) {
-    const token = allTokens[tokenIndex];
-    if (!token) return Promise.resolve();
-    return writeClipboard(token.raw || '');
+    const raw = rawOfRange(rangeOf(tokenIndex));
+    if (!raw) return Promise.resolve();
+    return writeClipboard(raw);
   }
   function cutBlockToClipboard(tokenIndex) {
     copyBlockToClipboard(tokenIndex).finally(() => deleteBlock(tokenIndex));
@@ -2365,9 +2465,7 @@
   async function pasteAfterBlock(tokenIndex) {
     const text = await readClipboard();
     if (text == null) return;
-    let insertAt = tokenIndex + 1;
-    if (insertAt < allTokens.length && allTokens[insertAt].type === 'space') insertAt++;
-    _insertMarkdownTokens(text, insertAt);
+    _insertMarkdownTokens(text, rangeOf(tokenIndex).end);
   }
   async function pasteAtEnd() {
     const text = await readClipboard();
@@ -2412,10 +2510,10 @@
     return Array.from(_selectedBlockIndices).sort((a, b) => a - b);
   }
 
+  // Block identities = the start token index of each visual block (H1/H2
+  // section or special block), in document order.
   function _visibleBlockIndices() {
-    const out = [];
-    allTokens.forEach((t, i) => { if (t.type !== 'space') out.push(i); });
-    return out;
+    return computeBlockRanges().map(r => r.start);
   }
 
   // ─── Keyboard navigation between blocks ───
@@ -2472,12 +2570,17 @@
     if (opts && opts.edit) _startEditingAtOffset(offset);
   }
 
-  /** Start editing the first visible block that begins at/after `offset`. */
+  /** Start editing the block containing the first token at/after `offset`. */
   function _startEditingAtOffset(offset) {
     let acc = 0;
     for (let i = 0; i < allTokens.length; i++) {
       const t = allTokens[i];
-      if (t.type !== 'space' && acc >= offset) { startEditing(i); return; }
+      if (t.type !== 'space' && acc >= offset) {
+        // Snap to the start of the block that contains token i.
+        const r = computeBlockRanges().find(rr => i >= rr.start && i < rr.end);
+        startEditing(r ? r.start : i);
+        return;
+      }
       acc += (t.raw || '').length;
     }
   }
@@ -2486,11 +2589,12 @@
   function insertBlockRelative(template, tokenIndex, where, opts) {
     let insertAfterIndex;
     if (where === 'below') {
-      insertAfterIndex = tokenIndex;
+      // After the block = after its last token.
+      insertAfterIndex = rangeOf(tokenIndex).end - 1;
     } else {
       const visible = _visibleBlockIndices();
       const pos = visible.indexOf(tokenIndex);
-      insertAfterIndex = (pos > 0) ? visible[pos - 1] : -1;
+      insertAfterIndex = (pos > 0) ? (rangeOf(visible[pos - 1]).end - 1) : -1;
     }
     _insertTemplateAfter(template, insertAfterIndex, opts);
   }
@@ -2569,7 +2673,7 @@
     const sorted = getSortedSelection();
     if (!sorted.length) return '';
     const parts = sorted
-      .map(i => (allTokens[i] && allTokens[i].raw) || '')
+      .map(i => rawOfRange(rangeOf(i)))
       .map(s => s.replace(/\s+$/, ''))
       .filter(s => s.length);
     return parts.join('\n\n') + '\n';
@@ -2583,13 +2687,11 @@
 
   function _deleteBlocksByIndices(sortedIndices) {
     if (!sortedIndices.length) return;
-    // Walk high → low so prior indices remain valid.
-    for (let k = sortedIndices.length - 1; k >= 0; k--) {
-      const i = sortedIndices[k];
-      if (i < 0 || i >= allTokens.length) continue;
-      let removeCount = 1;
-      if (i + 1 < allTokens.length && allTokens[i + 1].type === 'space') removeCount = 2;
-      allTokens.splice(i, removeCount);
+    // Resolve to ranges, then splice high → low so earlier ranges stay valid.
+    const ranges = sortedIndices.map(rangeOf).sort((a, b) => b.start - a.start);
+    for (const r of ranges) {
+      if (r.start < 0 || r.start >= allTokens.length) continue;
+      allTokens.splice(r.start, r.end - r.start);
     }
     const fullText = getFullMarkdown();
     sendEdit(fullText);
@@ -2765,9 +2867,9 @@
   }
 
   function requestDeleteBlock(tokenIndex) {
-    const token = allTokens[tokenIndex];
-    if (!token) return;
-    const preview = (token.raw || '').trim().split('\n')[0].slice(0, 60) || '(空のブロック)';
+    const raw = rawOfRange(rangeOf(tokenIndex));
+    if (!raw && !allTokens[tokenIndex]) return;
+    const preview = (raw || '').trim().split('\n')[0].slice(0, 60) || '(空のブロック)';
     showConfirmDialog(
       'このブロックを削除しますか？\n\n' + preview,
       () => deleteBlock(tokenIndex),
@@ -2776,30 +2878,28 @@
   }
 
   function deleteBlock(tokenIndex) {
-    if (tokenIndex < 0 || tokenIndex >= allTokens.length) return;
-    if (editingBlockIndex === tokenIndex) {
+    const range = rangeOf(tokenIndex);
+    if (range.start < 0 || range.start >= allTokens.length) return;
+    // Remove the whole block range (heading + section body + trailing blank).
+    if (editingBlockIndex >= range.start && editingBlockIndex < range.end) {
       editingBlockIndex = -1;
+      _editingRange = null;
     }
-    // Remove the block, and any trailing space token attached to it.
-    let removeCount = 1;
-    if (tokenIndex + 1 < allTokens.length && allTokens[tokenIndex + 1].type === 'space') {
-      removeCount = 2;
-    }
-    allTokens.splice(tokenIndex, removeCount);
+    allTokens.splice(range.start, range.end - range.start);
     const fullText = getFullMarkdown();
     sendEdit(fullText);
     handleDocumentUpdate(fullText);
   }
 
   function moveBlock(tokenIndex, direction) {
-    const visibleIdx = [];
-    allTokens.forEach((t, i) => { if (t.type !== 'space') visibleIdx.push(i); });
-    const pos = visibleIdx.indexOf(tokenIndex);
+    const starts = _visibleBlockIndices();
+    const pos = starts.indexOf(tokenIndex);
     if (pos < 0) return;
     const targetPos = pos + direction;
-    if (targetPos < 0 || targetPos >= visibleIdx.length) return;
-    const targetIdx = visibleIdx[targetPos];
-    reorderBlock(tokenIndex, direction > 0 ? targetIdx + 1 : targetIdx);
+    if (targetPos < 0 || targetPos >= starts.length) return;
+    const targetRange = rangeOf(starts[targetPos]);
+    // Down → drop after the target block; up → drop before it.
+    reorderBlock(tokenIndex, direction > 0 ? targetRange.end : targetRange.start);
   }
 
   /**
@@ -2809,11 +2909,10 @@
    */
   function reorderBlock(sourceTokenIndex, destBeforeIndex) {
     if (sourceTokenIndex === destBeforeIndex) return;
-    // Determine source slice length (block + optional trailing space).
-    let len = 1;
-    if (sourceTokenIndex + 1 < allTokens.length && allTokens[sourceTokenIndex + 1].type === 'space') {
-      len = 2;
-    }
+    // Source slice = the whole block range (section body + trailing space).
+    const srcRange = rangeOf(sourceTokenIndex);
+    const len = srcRange.end - srcRange.start;
+    sourceTokenIndex = srcRange.start;
     if (destBeforeIndex > sourceTokenIndex && destBeforeIndex < sourceTokenIndex + len) return;
     const removed = allTokens.splice(sourceTokenIndex, len);
     let insertAt = destBeforeIndex;
@@ -2879,15 +2978,9 @@
       block.classList.remove('block-drop-before');
       block.classList.remove('block-drop-after');
       if (isNaN(targetIdx) || source === targetIdx) return;
-      // Compute destBeforeIndex
-      let dest;
-      if (before) {
-        dest = targetIdx;
-      } else {
-        // After target — include its trailing space if any.
-        dest = targetIdx + 1;
-        if (dest < allTokens.length && allTokens[dest].type === 'space') dest++;
-      }
+      // Compute destBeforeIndex from the target block's range.
+      const targetRange = rangeOf(targetIdx);
+      const dest = before ? targetRange.start : targetRange.end;
       reorderBlock(source, dest);
     });
   }
