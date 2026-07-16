@@ -217,20 +217,7 @@
     const template = getNewBlockTemplate(action);
     if (template) {
       showInsertPositionPicker((insertAfterIndex) => {
-        const newContent = '\n\n' + template + '\n';
-        let fullText;
-        if (insertAfterIndex < 0) {
-          fullText = newContent.trimStart() + '\n' + getFullMarkdown();
-        } else {
-          // Include any trailing space token after the target
-          let splitAt = insertAfterIndex + 1;
-          if (splitAt < allTokens.length && allTokens[splitAt].type === 'space') splitAt++;
-          const before = allTokens.slice(0, splitAt).map(t => t.raw).join('');
-          const after = allTokens.slice(splitAt).map(t => t.raw).join('');
-          fullText = before + newContent + after;
-        }
-        sendEdit(fullText);
-        handleDocumentUpdate(fullText);
+        _insertTemplateAfter(template, insertAfterIndex);
       });
     }
   }
@@ -272,7 +259,9 @@
     setTimeout(() => document.addEventListener('mousedown', closer, true), 0);
   }
 
-  function showMermaidPicker() {
+  // `fixedInsert` (optional): { tokenIndex, where } to insert the diagram
+  // above/below a specific block instead of prompting for the position.
+  function showMermaidPicker(fixedInsert) {
     // Remove existing picker if any
     const existing = document.querySelector('.mermaid-picker-overlay');
     if (existing) existing.remove();
@@ -327,20 +316,14 @@
 
     function selectItem(dt) {
       overlay.remove();
+      // When invoked from the block "add block" menu, insert at the fixed
+      // above/below position instead of prompting.
+      if (fixedInsert && typeof fixedInsert.tokenIndex === 'number') {
+        insertBlockRelative(dt.template, fixedInsert.tokenIndex, fixedInsert.where, { edit: true });
+        return;
+      }
       showInsertPositionPicker((insertAfterIndex) => {
-        const newContent = '\n\n' + dt.template + '\n';
-        let fullText;
-        if (insertAfterIndex < 0) {
-          fullText = newContent.trimStart() + '\n' + getFullMarkdown();
-        } else {
-          let splitAt = insertAfterIndex + 1;
-          if (splitAt < allTokens.length && allTokens[splitAt].type === 'space') splitAt++;
-          const before = allTokens.slice(0, splitAt).map(t => t.raw).join('');
-          const after = allTokens.slice(splitAt).map(t => t.raw).join('');
-          fullText = before + newContent + after;
-        }
-        sendEdit(fullText);
-        handleDocumentUpdate(fullText);
+        _insertTemplateAfter(dt.template, insertAfterIndex);
       });
     }
 
@@ -422,15 +405,15 @@
     title.textContent = '挿入位置を選択';
     dialog.appendChild(title);
 
-    const list = document.createElement('div');
-    list.className = 'insert-pos-list';
-
     // If a block is currently selected, default the picker to "after that block"
     // (use the last block in the selection). null = nothing selected.
     const _sel = getSortedSelection();
     const preselectIndex = _sel.length ? _sel[_sel.length - 1] : null;
     /** @type {HTMLElement|null} the item to highlight + focus on open */
     let preselectedEl = null;
+
+    const list = document.createElement('div');
+    list.className = 'insert-pos-list';
 
     // "Insert at beginning" option
     const topItem = document.createElement('button');
@@ -443,10 +426,6 @@
     for (const { token, index } of visibleTokens) {
       const item = document.createElement('button');
       item.className = 'insert-pos-item';
-      if (index === preselectIndex) {
-        item.classList.add('insert-pos-selected');
-        preselectedEl = item;
-      }
       let label = '';
       const raw = (token.raw || '').trim();
       if (token.type === 'heading') {
@@ -468,6 +447,10 @@
       }
       item.innerHTML = '<span class="insert-pos-icon">↓</span><span class="insert-pos-label">' + escapeHtml(label) + ' の後に挿入</span>';
       item.addEventListener('click', () => { overlay.remove(); callback(index); });
+      if (index === preselectIndex) {
+        item.classList.add('insert-pos-selected');
+        preselectedEl = item;
+      }
       list.appendChild(item);
     }
 
@@ -747,6 +730,16 @@
           e.preventDefault();
           requestDeleteBlock(index);
         }
+        // Keyboard-only navigation between blocks.
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          focusAdjacentBlock(index, e.key === 'ArrowDown' ? 1 : -1);
+        }
+        // Add a new block below (or above with Shift) without the mouse.
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          showAddBlockMenuAtBlock(index, e.shiftKey ? 'above' : 'below');
+        }
       });
 
       // Right-click context menu on the block
@@ -939,7 +932,7 @@
     blockEl.innerHTML =
       '<div class="block-editor">' +
         '<textarea>' + escapeHtml(rawText) + '</textarea>' +
-        '<div class="block-editor-hint">Escape / Ctrl+Enter: 編集完了　|　Ctrl+B: 太字　|　Ctrl+I: 斜体</div>' +
+        '<div class="block-editor-hint">Escape / Ctrl+Enter: 編集完了　|　Alt+↑/↓: 前後のブロックへ　|　Ctrl+B: 太字　|　Ctrl+I: 斜体</div>' +
       '</div>';
 
     const textarea = blockEl.querySelector('textarea');
@@ -974,6 +967,10 @@
       } else if (e.key === 'Enter' && e.ctrlKey) {
         e.preventDefault();
         finishEditing();
+      } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.altKey) {
+        // Commit this block and jump straight into editing the adjacent one.
+        e.preventDefault();
+        editAdjacentBlock(tokenIndex, e.key === 'ArrowDown' ? 1 : -1);
       } else if (e.key === 'b' && e.ctrlKey) {
         e.preventDefault();
         applyFormatting(textarea, 'bold');
@@ -1060,7 +1057,8 @@
       'ルート以下に <b>ノードをツリー状</b> に追加します。形状（rect / cloud 等）も選択可。',
     ]},
     quadrant: { title: '象限チャートエディタ', hints: [
-      '日本語ラベルは Mermaid 仕様上エラーになることがあるため <b>ASCII 推奨</b> です。',
+      '軸・象限・データ点の<b>ラベルは日本語でもそのまま</b>使えます（保存時に自動で引用符が付きます）。',
+      '図上で<b>データ点をドラッグ</b>して位置を変更、<b>ダブルクリック</b>で名前を編集できます。',
     ]},
     gantt: { title: 'ガントチャートエディタ', hints: [
       '<b>セクション</b>（章）を作り、その中に <b>タスク</b> を追加します。',
@@ -2259,6 +2257,9 @@
     const items = [
       { label: '✎ 編集', onClick: () => startEditing(tokenIndex) },
       'separator',
+      { label: '⬆ 上にブロックを追加…', onClick: () => showAddBlockMenu(tokenIndex, 'above', clientX, clientY) },
+      { label: '⬇ 下にブロックを追加…', onClick: () => showAddBlockMenu(tokenIndex, 'below', clientX, clientY) },
+      'separator',
       { label: '✂ 切り取り', onClick: () => cutBlockToClipboard(tokenIndex) },
       { label: '⧉ コピー', onClick: () => copyBlockToClipboard(tokenIndex) },
       { label: '📋 貼り付け (このブロックの後ろ)', onClick: () => pasteAfterBlock(tokenIndex) },
@@ -2407,6 +2408,122 @@
     const out = [];
     allTokens.forEach((t, i) => { if (t.type !== 'space') out.push(i); });
     return out;
+  }
+
+  // ─── Keyboard navigation between blocks ───
+  /** Move DOM focus to the previous/next visible block (dir: -1 | +1). */
+  function focusAdjacentBlock(tokenIndex, dir) {
+    const visible = _visibleBlockIndices();
+    const pos = visible.indexOf(tokenIndex);
+    if (pos < 0) return;
+    const targetPos = pos + dir;
+    if (targetPos < 0 || targetPos >= visible.length) return;
+    const el = document.querySelector('[data-token-index="' + visible[targetPos] + '"]');
+    if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+  }
+
+  /** Commit the current edit and open the previous/next block for editing. */
+  function editAdjacentBlock(tokenIndex, dir) {
+    const visible = _visibleBlockIndices();
+    const pos = visible.indexOf(tokenIndex);
+    if (pos < 0) return;
+    const targetPos = pos + dir;
+    if (targetPos < 0 || targetPos >= visible.length) return;
+    const targetIndex = visible[targetPos];
+    // finishEditing() only rewrites the current block's raw and re-renders that
+    // single block, so token indices stay valid for the follow-up startEditing.
+    finishEditing();
+    startEditing(targetIndex);
+  }
+
+  // ─── Insert a new block relative to an existing one ───
+  /** Insert `template` after the given token index (-1 = document start). */
+  function _insertTemplateAfter(template, insertAfterIndex, opts) {
+    let fullText, offset;
+    if (insertAfterIndex < 0) {
+      fullText = template + '\n\n' + getFullMarkdown();
+      offset = 0;
+    } else {
+      let splitAt = insertAfterIndex + 1;
+      if (splitAt < allTokens.length && allTokens[splitAt].type === 'space') splitAt++;
+      const before = allTokens.slice(0, splitAt).map(t => t.raw).join('');
+      const after = allTokens.slice(splitAt).map(t => t.raw).join('');
+      // Guarantee a blank line on both sides so the inserted block never merges
+      // into an adjacent paragraph/list (markdown lazy continuation).
+      const beforeSep = /\n\n$/.test(before) ? '' : (/\n$/.test(before) ? '\n' : '\n\n');
+      const afterSep = after ? (/^\n/.test(after) ? '\n' : '\n\n') : '';
+      fullText = before + beforeSep + template + afterSep + after;
+      offset = (before + beforeSep).length;
+    }
+    sendEdit(fullText);
+    handleDocumentUpdate(fullText);
+    if (opts && opts.edit) _startEditingAtOffset(offset);
+  }
+
+  /** Start editing the first visible block that begins at/after `offset`. */
+  function _startEditingAtOffset(offset) {
+    let acc = 0;
+    for (let i = 0; i < allTokens.length; i++) {
+      const t = allTokens[i];
+      if (t.type !== 'space' && acc >= offset) { startEditing(i); return; }
+      acc += (t.raw || '').length;
+    }
+  }
+
+  /** Insert `template` above/below the block at tokenIndex. */
+  function insertBlockRelative(template, tokenIndex, where, opts) {
+    let insertAfterIndex;
+    if (where === 'below') {
+      insertAfterIndex = tokenIndex;
+    } else {
+      const visible = _visibleBlockIndices();
+      const pos = visible.indexOf(tokenIndex);
+      insertAfterIndex = (pos > 0) ? visible[pos - 1] : -1;
+    }
+    _insertTemplateAfter(template, insertAfterIndex, opts);
+  }
+
+  // Block types offered by the right-click "add block" menu.
+  function _addBlockTypes() {
+    return [
+      { label: '¶ 段落', tpl: 'テキスト' },
+      { label: 'H1 見出し1', tpl: '# 見出し1' },
+      { label: 'H2 見出し2', tpl: '## 見出し2' },
+      { label: 'H3 見出し3', tpl: '### 見出し3' },
+      { label: '• 箇条書きリスト', tpl: '- リスト項目' },
+      { label: '1. 番号付きリスト', tpl: '1. リスト項目' },
+      { label: '☑ タスクリスト', tpl: '- [ ] タスク' },
+      { label: '⊞ 表', tpl: getNewBlockTemplate('table') },
+      { label: '{ } コードブロック', tpl: '```\nコード\n```' },
+      { label: '∑ 数式', tpl: '```math\nE = mc^2\n```' },
+      { label: '❝ 引用', tpl: '> 引用' },
+      { label: '─ 水平線', tpl: '---' },
+    ];
+  }
+
+  /**
+   * Show a block-type picker (as a context menu) and insert the chosen block
+   * above/below the reference block. `where` is 'above' | 'below'.
+   */
+  function showAddBlockMenu(tokenIndex, where, clientX, clientY) {
+    if (!window.DiagramCommon || !window.DiagramCommon.showContextMenu) return;
+    const items = _addBlockTypes().map(bt => ({
+      label: bt.label,
+      onClick: () => insertBlockRelative(bt.tpl, tokenIndex, where, { edit: true }),
+    }));
+    items.push('separator');
+    items.push({
+      label: '◇ Mermaid ダイアグラム…',
+      onClick: () => showMermaidPicker({ tokenIndex, where }),
+    });
+    window.DiagramCommon.showContextMenu(clientX, clientY, items);
+  }
+
+  /** Keyboard entry point: open the add-block picker anchored to the block. */
+  function showAddBlockMenuAtBlock(tokenIndex, where) {
+    const el = document.querySelector('[data-token-index="' + tokenIndex + '"]');
+    const rect = el ? el.getBoundingClientRect() : { left: 80, bottom: 80 };
+    showAddBlockMenu(tokenIndex, where, rect.left + 20, (where === 'below' ? rect.bottom : rect.top) );
   }
 
   function handleBlockSelectionClick(tokenIndex, e) {
