@@ -3,7 +3,7 @@
   "displayName": "Markdown Visual Editor",
   "publisher": "rkojima",
   "description": "WYSIWYG Markdown editor with GUI editing for 21 Mermaid diagram types, LaTeX math (KaTeX), and tables, plus live change highlighting. 100% local, no telemetry. / Markdown WYSIWYG エディタ。Mermaid 21 種類、LaTeX 数式 (KaTeX)、テーブルを GUI 編集可能。変更ハイライト対応・完全ローカル動作。",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "license": "MIT",
   "icon": "media/icon.png",
   "repository": {
@@ -72,7 +72,30 @@
         ],
         "priority": "option"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "mdVisualEditor.openVisualEditor",
+        "title": "Markdown ビジュアルエディタで開く",
+        "category": "Markdown Visual Editor",
+        "icon": "$(preview)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "mdVisualEditor.openVisualEditor",
+          "when": "resourceExtname == .md && activeCustomEditorId != mdVisualEditor.markdownEditor",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "mdVisualEditor.openVisualEditor",
+          "when": "resourceExtname == .md"
+        }
+      ]
+    }
   },
   "scripts": {
     "compile": "node esbuild.mjs",

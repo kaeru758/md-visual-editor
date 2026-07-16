@@ -957,16 +957,16 @@
             () => {
               // Restore original then finish (which writes back the now-restored value)
               textarea.value = originalText;
-              finishEditing();
+              finishEditing(true);
             },
             { okLabel: '破棄', cancelLabel: '編集を続ける', danger: true }
           );
         } else {
-          finishEditing();
+          finishEditing(true);
         }
       } else if (e.key === 'Enter' && e.ctrlKey) {
         e.preventDefault();
-        finishEditing();
+        finishEditing(true);
       } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.altKey) {
         // Commit this block and jump straight into editing the adjacent one.
         e.preventDefault();
@@ -997,7 +997,9 @@
     });
   }
 
-  function finishEditing() {
+  // `restoreFocus` (keyboard-initiated finish): keep the block selected and
+  // focused so the user can keep navigating (↑/↓, Enter) without the mouse.
+  function finishEditing(restoreFocus) {
     if (editingBlockIndex < 0) return;
 
     // Clean up visual editor if active
@@ -1032,6 +1034,12 @@
     }
 
     sendEdit(getFullMarkdown());
+
+    if (restoreFocus) {
+      replaceBlockSelection([tokenIndex]);
+      blockEl.focus();
+      blockEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
   }
 
   /** Active visual editor instance (if any) */
@@ -2411,14 +2419,17 @@
   }
 
   // ─── Keyboard navigation between blocks ───
-  /** Move DOM focus to the previous/next visible block (dir: -1 | +1). */
+  /** Move DOM focus + selection to the previous/next visible block (dir: -1 | +1). */
   function focusAdjacentBlock(tokenIndex, dir) {
     const visible = _visibleBlockIndices();
     const pos = visible.indexOf(tokenIndex);
     if (pos < 0) return;
     const targetPos = pos + dir;
     if (targetPos < 0 || targetPos >= visible.length) return;
-    const el = document.querySelector('[data-token-index="' + visible[targetPos] + '"]');
+    const targetIndex = visible[targetPos];
+    // Keep the selection in sync so the current block stays highlighted.
+    replaceBlockSelection([targetIndex]);
+    const el = document.querySelector('[data-token-index="' + targetIndex + '"]');
     if (el) { el.focus(); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
   }
 
@@ -2433,6 +2444,7 @@
     // finishEditing() only rewrites the current block's raw and re-renders that
     // single block, so token indices stay valid for the follow-up startEditing.
     finishEditing();
+    replaceBlockSelection([targetIndex]);
     startEditing(targetIndex);
   }
 
