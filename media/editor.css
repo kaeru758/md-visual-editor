@@ -425,9 +425,10 @@ body {
   bottom: 8px;
   right: 8px;
   display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 4px;
   background: var(--vscode-editorWidget-background, #252526);
   border: 1px solid var(--vscode-editorWidget-border, #454545);
   border-radius: 5px;
@@ -435,9 +436,29 @@ body {
   opacity: 0;
   transition: opacity 0.15s;
   z-index: 3;
-  flex-wrap: wrap;
   max-width: 90%;
-  justify-content: flex-end;
+}
+.mzc-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+/* Directional cross (D-pad): ▲ / ◀ ✥ ▶ / ▼ */
+.mzc-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 26px);
+  grid-template-rows: repeat(3, 22px);
+  gap: 1px;
+}
+.mzc-pad .mzc-up { grid-column: 2; grid-row: 1; }
+.mzc-pad .mzc-left { grid-column: 1; grid-row: 2; }
+.mzc-pad .mzc-grab { grid-column: 2; grid-row: 2; cursor: grab; }
+.mzc-pad .mzc-right { grid-column: 3; grid-row: 2; }
+.mzc-pad .mzc-down { grid-column: 2; grid-row: 3; }
+/* While dragging from any pad button, show the grabbing cursor everywhere. */
+.mermaid-zoom-controls.mzc-dragging,
+.mermaid-zoom-controls.mzc-dragging .mzc-btn {
+  cursor: grabbing;
 }
 .mermaid-container.mermaid-zoomable:hover .mermaid-zoom-controls,
 .mermaid-zoom-controls:focus-within {
