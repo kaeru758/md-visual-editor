@@ -979,22 +979,80 @@
 
       const ov = document.createElement('div');
       ov.className = 'mermaid-zoom-controls';
-      const mk = (html, title, fn) => {
-        const b = document.createElement('button');
-        b.type = 'button'; b.className = 'mzc-btn'; b.innerHTML = html; b.title = title;
-        b.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); fn(); });
-        ov.appendChild(b);
+
+      // Press-and-drag panning: works from any control button, so the user can
+      // grab the cross pad and drag the diagram around (drag & drop style).
+      // A plain click (no movement) still performs the button's step action.
+      const attachPadDrag = (el) => {
+        el.addEventListener('pointerdown', (e) => {
+          if (e.button !== 0) return;
+          e.stopPropagation();
+          const startX = e.clientX, startY = e.clientY;
+          const ox0 = st.px, oy0 = st.py;
+          let dragging = false;
+          const move = (ev) => {
+            const dx = ev.clientX - startX, dy = ev.clientY - startY;
+            if (!dragging && Math.abs(dx) + Math.abs(dy) > 3) {
+              dragging = true;
+              ov.classList.add('mzc-dragging');
+            }
+            if (dragging) { st.px = ox0 + dx; st.py = oy0 + dy; apply(); }
+          };
+          const up = (ev) => {
+            el.removeEventListener('pointermove', move);
+            el.removeEventListener('pointerup', up);
+            el.removeEventListener('pointercancel', up);
+            try { el.releasePointerCapture(ev.pointerId); } catch (_e) { /* */ }
+            ov.classList.remove('mzc-dragging');
+            // Swallow the click that follows a real drag.
+            if (dragging) { st.justDragged = true; setTimeout(() => { st.justDragged = false; }, 0); }
+          };
+          try { el.setPointerCapture(e.pointerId); } catch (_e) { /* */ }
+          el.addEventListener('pointermove', move);
+          el.addEventListener('pointerup', up);
+          el.addEventListener('pointercancel', up);
+        });
       };
-      mk('🔍+', '拡大 (Ctrl+ホイール↑)', () => { st.z = clamp(st.z + 0.2); apply(); });
-      mk('🔍−', '縮小 (Ctrl+ホイール↓)', () => { st.z = clamp(st.z - 0.2); apply(); });
-      mk('⊞', 'フィット', () => fit());
-      mk('◀', '左へ移動', () => { st.px += 60; apply(); });
-      mk('▶', '右へ移動', () => { st.px -= 60; apply(); });
-      mk('▲', '上へ移動', () => { st.py += 60; apply(); });
-      mk('▼', '下へ移動', () => { st.py -= 60; apply(); });
+
+      const mk = (parent, html, title, fn, cls) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'mzc-btn' + (cls ? ' ' + cls : '');
+        b.innerHTML = html; b.title = title;
+        b.addEventListener('click', (e) => {
+          e.stopPropagation(); e.preventDefault();
+          if (st.justDragged) return; // came from a drag, not a click
+          fn();
+        });
+        parent.appendChild(b);
+        return b;
+      };
+
+      // Zoom row
+      const zoomRow = document.createElement('div');
+      zoomRow.className = 'mzc-row';
+      mk(zoomRow, '🔍+', '拡大 (Ctrl+ホイール↑)', () => { st.z = clamp(st.z + 0.2); apply(); });
+      mk(zoomRow, '🔍−', '縮小 (Ctrl+ホイール↓)', () => { st.z = clamp(st.z - 0.2); apply(); });
+      mk(zoomRow, '⊞', 'フィット', () => fit());
       st.label = document.createElement('span');
       st.label.className = 'mzc-label'; st.label.textContent = '100%';
-      ov.appendChild(st.label);
+      zoomRow.appendChild(st.label);
+      ov.appendChild(zoomRow);
+
+      // Directional cross (D-pad). Click = step move, press & drag = free move.
+      const pad = document.createElement('div');
+      pad.className = 'mzc-pad';
+      pad.title = 'クリックで移動 / 押したままドラッグで自由に移動';
+      const padBtns = [
+        mk(pad, '▲', '上へ移動（押したままドラッグで自由移動）', () => { st.py += 60; apply(); }, 'mzc-up'),
+        mk(pad, '◀', '左へ移動（押したままドラッグで自由移動）', () => { st.px += 60; apply(); }, 'mzc-left'),
+        mk(pad, '✥', '押したままドラッグで移動 / クリックで中央に戻す', () => { st.px = 0; st.py = 0; apply(); }, 'mzc-grab'),
+        mk(pad, '▶', '右へ移動（押したままドラッグで自由移動）', () => { st.px -= 60; apply(); }, 'mzc-right'),
+        mk(pad, '▼', '下へ移動（押したままドラッグで自由移動）', () => { st.py -= 60; apply(); }, 'mzc-down'),
+      ];
+      padBtns.forEach(attachPadDrag);
+      ov.appendChild(pad);
+
       container.appendChild(ov);
 
       // Ctrl + wheel to zoom.
