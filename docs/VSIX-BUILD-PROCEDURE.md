@@ -9,41 +9,57 @@
 リリース時は以下の順番で必ず実施します。
 
 1. **コード修正・動作確認を完了させる**（手動 F5 デバッグでも可）。
-2. **`package.json` の `version` を上げる**（例: `0.5.1` → `0.5.2`）。
+2. **`package.json` の `version` を上げる**（例: `0.5.6` → `0.5.7`）。
 3. **`CHANGELOG.md` の先頭に新バージョンの項目を追加する**。
 4. **コンパイル確認**:
    ```powershell
    npm run compile
    ```
-   `dist/extension.js` が更新されること。
+   `dist/extension.js` が更新され、`media/vendor/` 配下（`marked.min.js` / `mermaid.min.js` / `katex.min.js` / `katex.min.css` / `fonts/`）が最新化されること（下記 §2 参照）。
 5. **VSIX 作成**:
    ```powershell
-   npx @vscode/vsce package --allow-missing-repository
+   npm run package
    ```
-   - **絶対に `--no-dependencies` を付けない**（理由は §3 参照）。
+   これは内部で `vsce package --no-dependencies --no-yarn` を実行します。パッケージング前に `vscode:prepublish`（= `node esbuild.mjs --production`）が自動実行されるため、手順 4 のコンパイルは事前確認用の任意ステップです。
+   - **`--no-dependencies` は必須**（理由は §3 参照。以前の「使用禁止」という記載とは逆になっています）。
 6. **生成された VSIX の中身を必ず確認する**:
-   - 出力ログに `node_modules/marked/marked.min.js` と `node_modules/mermaid/dist/mermaid.min.js` が含まれていること。
-   - サイズの目安は **約 1 MB**。極端に小さい (例: 100 KB 台) 場合は依存欠落の疑いあり。
+   - コンソール出力（`INFO Files included in the VSIX:` の一覧、または `vsce ls --tree`）に `media/vendor/marked.min.js` / `media/vendor/mermaid.min.js` / `media/vendor/katex.min.js` / `media/vendor/katex.min.css` / `media/vendor/fonts/*.woff*` が含まれていること。
+   - サイズの目安は **概ね 1.5〜2 MB**（大半は `mermaid.min.js` と KaTeX フォント一式）。極端に小さい場合は vendor アセットの欠落を疑う。
 7. **インストールテスト**:
    ```powershell
    code --install-extension md-visual-editor-<version>.vsix --force
    ```
-   実際に Markdown ファイルを開いて Mermaid 図が描画されることを確認。
+   実際に Markdown ファイルを開いて Mermaid 図・数式（KaTeX）が描画されることを確認。
+8. **（Marketplace へ公開する場合のみ）`npm run publish`**:
+   ```powershell
+   npm run publish
+   ```
+   内部で `vsce publish --no-dependencies --no-yarn` を実行します。社内配布限定で運用している間は通常このステップは不要です（[INSTALL-GUIDE.md](INSTALL-GUIDE.md) 参照）。事前に `vsce login <publisher>` などでパブリッシャー認証が済んでいることを確認してください。
 
 ---
 
 ## 2. 必要な依存・前提
 
-- **Node.js**: v20 以上を推奨（v24 でも動作確認済み 2026-04-27）。
-- **`@vscode/vsce`**: `^3.2.1` 以上を `devDependencies` に固定。
+- **Node.js**: v20 以上を推奨（v24 でも動作確認済み）。`@vscode/vsce` v3 系が `engines.node: >= 20` を要求するため、v18 以下では動作しません。
+- **`@vscode/vsce`**: `^3.2.1` 以上を `devDependencies` に固定（現在インストール済みバージョン: `3.9.1`）。
   - v2 系は新しい `hosted-git-info` などの依存と非互換のため使わないこと。
-- **`marked`** と **`mermaid`** はランタイム依存 (`dependencies`)。webview が `node_modules/...` を直接 `<script src=...>` で読み込む構造のため、**VSIX に必ず同梱する必要がある**。
+- **ビルド時の vendor アセットコピー（`esbuild.mjs`）**: Webview は `marked`（Markdown パーサー）・`mermaid`（ダイアグラム描画）・`katex`（数式レンダリング、CSS・フォント含む）を `<script>` / `<link>` タグでランタイム読み込みします。これらは `dependencies`（`package.json`）としてインストールされますが、**VSIX には `node_modules` のままでは同梱されません**。代わりに `esbuild.mjs` の `copyVendorAssets()` が `compile` / `--production` 実行のたびに以下をコピーします。
+
+  | コピー元 | コピー先 |
+  |---|---|
+  | `node_modules/marked/marked.min.js` | `media/vendor/marked.min.js` |
+  | `node_modules/mermaid/dist/mermaid.min.js` | `media/vendor/mermaid.min.js` |
+  | `node_modules/katex/dist/katex.min.js` | `media/vendor/katex.min.js` |
+  | `node_modules/katex/dist/katex.min.css` | `media/vendor/katex.min.css` |
+  | `node_modules/katex/dist/fonts/*.{woff,woff2}`（`.ttf` は除外） | `media/vendor/fonts/*` |
+
+  その後 `src/extension.ts` を esbuild で `dist/extension.js`（CJS バンドル、`--production` 時は minify）にバンドルします。`.vscodeignore` は `node_modules/**` を丸ごと除外する一方、`media/vendor/**` は通常の `media/**` として VSIX に含まれます。
 
 ---
 
 ## 3. 失敗事例と恒久対策
 
-### 失敗 1: `TypeError: LRU is not a constructor` で vsce が起動できない
+### 失敗 1: `TypeError: LRU is not a constructor` で vsce が起動できない（過去の事象・現在は発生しない構成）
 
 **症状**:
 ```
@@ -54,32 +70,30 @@ TypeError: LRU is not a constructor
 ```
 
 **原因**:
-- `package.json` の `overrides` に `"lru-cache": "~10.4.3"` が指定されていた。
+- 当時の `package.json` の `overrides` に `"lru-cache": "~10.4.3"` が指定されていた。
 - vsce v2 系の依存 `hosted-git-info@4` は古い `lru-cache` の `new LRU()` API を呼ぶが、override で v10 を強制すると壊れる。
-- v10 系の `lru-cache` はクラスを default export しておらず、コンストラクタ呼び出しが失敗する。
 
-**恒久対策**:
-- `overrides` で `lru-cache` を強制しない（必要なら別途 npm audit で個別に対応）。
-- `@vscode/vsce` を v3 系（`^3.2.1` 以上）にアップグレードする。v3 では `hosted-git-info` 等が更新されており本問題が起きない。
-- どうしても override が必要な場合は、`@vscode/vsce` の依存ツリーを除外する形 (`overrides` のネスト指定) で限定する。
+**現在の状態**:
+- `@vscode/vsce` を v3 系（`^3.2.1` 以上）に統一したことでこの問題自体が解消し、**`overrides` は空（`{}`）** になっています。この override を復活させる必要はありません。
+- どうしても特定の推移的依存を固定したい場合のみ、`@vscode/vsce` の依存ツリーに限定した `overrides` のネスト指定を検討してください。
 
-### 失敗 2: VSIX を作ったが拡張機能が動作しない（webview が真っ白 / Mermaid 描画されない）
+### 失敗 2: VSIX を作ったが拡張機能が動作しない（webview が真っ白 / Mermaid・数式が描画されない）
 
 **症状**:
-- `--no-dependencies` を付けて VSIX を作成。サイズが極端に小さい（100 KB 台）。
-- インストール後、Markdown を開いても Mermaid 図が描画されない、コンソールに 404 エラー。
+- インストール後、Markdown を開いても Mermaid 図や数式が描画されない、コンソールに 404 エラー。
+- VSIX のサイズが極端に小さい（数百 KB 以下）。
 
 **原因**:
-- 本拡張は `src/markdownVisualEditorProvider.ts` で webview から
-  `node_modules/marked/marked.min.js` と
-  `node_modules/mermaid/dist/mermaid.min.js`
-  を `<script src>` で直接読み込む設計になっている。
-- `--no-dependencies` を指定すると `node_modules/` が VSIX から除外され、上記ファイルが見つからず動作不能になる。
+- 本拡張は webview から `media/vendor/marked.min.js` / `media/vendor/mermaid.min.js` / `media/vendor/katex.min.js` / `media/vendor/katex.min.css` を `<script src>` / `<link href>` で直接読み込む設計になっています。
+- `esbuild.mjs` の `copyVendorAssets()` が実行されないまま（＝ `npm run compile` や `vscode:prepublish` を経由せず）パッケージングすると、`media/vendor/` が空または古いままになり、上記ファイルが見つからず動作不能になります。
 
 **恒久対策**:
-- **`--no-dependencies` は使用禁止**。標準は `npx @vscode/vsce package --allow-missing-repository` のみ。
-- リリース後、出力ログで `node_modules/marked/marked.min.js` と `node_modules/mermaid/dist/mermaid.min.js` が含まれていることを必ず目視確認する。
-- VSIX の最終サイズが概ね 1 MB 前後であることを確認する（極端に小さい場合は依存欠落）。
+- リリース時は **`npm run package` を使う**（`vscode:prepublish` フックで `esbuild.mjs --production` が自動実行されるため、vendor コピー漏れが起きにくい）。
+- 直接 `vsce package` を呼ぶ場合は、必ず事前に `npm run compile` を実行して `media/vendor/` が最新であることを確認する。
+- リリース後、出力ログまたは `vsce ls --tree` で `media/vendor/marked.min.js` / `media/vendor/mermaid.min.js` / `media/vendor/katex.min.js` / `media/vendor/katex.min.css` / `media/vendor/fonts/` が含まれていることを必ず目視確認する。
+- VSIX の最終サイズが概ね 1.5〜2 MB 前後であることを確認する（極端に小さい場合は vendor 欠落の疑い）。
+
+> ⚠️ **旧版の注意書き「`--no-dependencies` は使用禁止」は現在の構成では誤りです。** 当時は `node_modules/marked` と `node_modules/mermaid` を `.vscodeignore` の許可リストで直接 VSIX に含める方式だったため `--no-dependencies` を付けると必要なファイルが消えていましたが、現在は vendor アセットを `media/vendor/` に事前コピーし `node_modules` を丸ごと除外する方式に変わったため、**`--no-dependencies` を付けるのが正しい構成**です（`npm run package` は既定でこのオプションを使用します）。
 
 ### 失敗 3: `npx vsce@latest` のインストールが OneDrive 配下で失敗する
 
@@ -95,7 +109,7 @@ EPERM: operation not permitted, rmdir ...
 
 **恒久対策**:
 - vsce は **常にプロジェクト直下で実行する**（`cd` してから）。
-- vsce は `devDependencies` にローカルインストール済みなので、`npx @vscode/vsce ...` で十分。`@latest` を毎回 `npx` で取得しない。
+- vsce は `devDependencies` にローカルインストール済みなので、`npm run package` / `npm run publish`（内部で `npx @vscode/vsce ...` 相当）で十分。`@latest` を毎回 `npx` で取得しない。
 
 ---
 
@@ -108,7 +122,7 @@ EPERM: operation not permitted, rmdir ...
 Remove-Item -Recurse -Force node_modules
 Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
 npm install --no-audit --no-fund
-npx @vscode/vsce package --allow-missing-repository
+npm run package
 ```
 
 これでクリーン状態から再構築できます。
@@ -118,10 +132,15 @@ npx @vscode/vsce package --allow-missing-repository
 ## 5. リリース直前の最終チェックリスト
 
 - [ ] `package.json` の `version` を更新した
-- [ ] `CHANGELOG.md` を更新した
-- [ ] `npm run compile` が成功する
-- [ ] `npx @vscode/vsce package --allow-missing-repository` を `--no-dependencies` **なし** で実行した
-- [ ] 出力ログに `node_modules/marked/marked.min.js` と `node_modules/mermaid/dist/mermaid.min.js` が含まれている
-- [ ] VSIX サイズが概ね 1 MB 前後である
-- [ ] `code --install-extension md-visual-editor-<version>.vsix --force` でインストールし、Mermaid 図が描画されることを確認した
+- [ ] `CHANGELOG.md` の先頭に新バージョンの変更点を追加した
+- [ ] `npm run compile` が成功する（`dist/extension.js` と `media/vendor/` 一式が最新化される）
+- [ ] `npm run package` を実行した（`--no-dependencies --no-yarn` は既定で付与される）
+- [ ] 出力ログまたは `vsce ls --tree` で `media/vendor/marked.min.js` / `media/vendor/mermaid.min.js` / `media/vendor/katex.min.js` / `media/vendor/katex.min.css` / `media/vendor/fonts/` が含まれていることを確認した
+- [ ] VSIX サイズが概ね 1.5〜2 MB 前後である
+- [ ] `code --install-extension md-visual-editor-<version>.vsix --force` でインストールし、Mermaid 図・数式（KaTeX）が描画されることを確認した
 - [ ] 旧バージョンの `*.vsix` は削除またはアーカイブした
+- [ ] （Marketplace へ公開する場合のみ）`npm run publish` を実行した
+
+---
+
+*最終更新: 2026年7月19日*
