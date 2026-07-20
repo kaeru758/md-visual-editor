@@ -2655,6 +2655,61 @@ body.tve-col-resizing * {
   min-width: 24px;
   font-size: 11px;
 }
+/* ── Element color dialog (背景色・文字色) ── */
+.dve-color-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 6px 0;
+}
+.dve-color-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, #252526);
+}
+.dve-color-name {
+  flex: 1 1 auto;
+  min-width: 60px;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dve-color-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dve-color-field input[type="color"] {
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--vscode-input-border, #555);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+.dve-color-field input[type="color"]:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.dve-color-lbl { color: var(--vscode-descriptionForeground, #aaa); }
+
+/* Flash the list row that corresponds to a node clicked in the diagram. */
+.dve-list-item.dve-row-flash {
+  animation: dve-row-flash 0.9s ease-out;
+}
+@keyframes dve-row-flash {
+  0% { background-color: var(--vscode-list-activeSelectionBackground, #094771); }
+  100% { background-color: transparent; }
+}
 /* Middle-mouse panning feedback in a diagram editor's SVG area. */
 .dve-svg-area.dve-panning {
   cursor: grabbing;
@@ -3566,6 +3621,15 @@ body.printing .block.block-changed::after {
 body.printing .block.block-changed {
   box-shadow: none !important;
   background: transparent !important;
+}
+/* Never carry the block selection highlight into the export / print preview
+   (right-clicking a block to reach "PDF として出力" selects it). */
+body.printing .block.block-selected,
+body.printing .block:hover,
+body.printing .block:focus-visible {
+  outline: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
 /* ===== LaTeX / KaTeX ===== */

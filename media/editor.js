@@ -646,8 +646,16 @@
   // Mermaid / math) stay as their own blocks so their dedicated visual editors
   // still apply. A "block" is a contiguous token range [start, end).
   let _blockRanges = [];
+  /** A paragraph that is nothing but a display-math expression ($$ … $$). */
+  function _isDisplayMathToken(t) {
+    if (!t || t.type !== 'paragraph') return false;
+    const m = (t.raw || '').trim().match(/^\$\$([\s\S]*)\$\$$/);
+    return !!m && !m[1].includes('$$');
+  }
   function _isSpecialTokenType(t) {
-    return !!t && (t.type === 'table' || t.type === 'code');
+    // Display math gets its own block too, so a formula never gets absorbed
+    // into the surrounding H1/H2 text section.
+    return !!t && (t.type === 'table' || t.type === 'code' || _isDisplayMathToken(t));
   }
   function computeBlockRanges(tokens) {
     tokens = tokens || allTokens;
@@ -3006,9 +3014,14 @@
       img.classList.remove('image-loading', 'image-error');
     });
 
-    // Strip transient interactive affordances.
+    // Strip transient interactive affordances. NOTE: the selection class is
+    // `block-selected` (right-clicking a block selects it), so it must be
+    // removed here or the exported page shows that block highlighted.
     clone.querySelectorAll('.block').forEach(b => {
-      b.classList.remove('editing', 'selected', 'search-current', 'block-changed');
+      b.classList.remove(
+        'editing', 'selected', 'block-selected', 'search-current', 'block-changed',
+        'block-dragging', 'block-drop-before', 'block-drop-after', 'image-drop-target'
+      );
       b.removeAttribute('contenteditable');
       b.removeAttribute('tabindex');
     });

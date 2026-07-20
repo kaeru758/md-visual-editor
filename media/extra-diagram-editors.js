@@ -11,6 +11,72 @@
   function _elText(tag, text, cls) { const e = _el(tag, cls); e.textContent = text; return e; }
   function _esc(t) { const d = document.createElement('div'); d.textContent = String(t == null ? '' : t); return d.innerHTML; }
 
+  // ─── Element color helpers (shared by State / Block / C4 / Class editors) ───
+  function _parseStyleColors(str) {
+    const o = {};
+    const b = String(str).match(/fill\s*:\s*([^,;]+)/i);
+    if (b) o.bg = b[1].trim();
+    const c = String(str).match(/(?:^|[,;])\s*color\s*:\s*([^,;]+)/i);
+    if (c) o.fg = c[1].trim();
+    return o;
+  }
+  function _colorToHex(c) {
+    if (!c) return null;
+    c = String(c).trim();
+    if (/^#[0-9a-f]{6}$/i.test(c)) return c;
+    if (/^#[0-9a-f]{3}$/i.test(c)) return '#' + c.slice(1).split('').map(x => x + x).join('');
+    return null; // named / rgb() — keep stored value, show default swatch
+  }
+  // Dialog listing colorable elements, each with a background + text color
+  // toggle. onApply receives the new styles map { id: {bg?, fg?} }.
+  function _showColorDialog(container, targets, current, onApply) {
+    container.querySelectorAll('.ve-dialog-overlay').forEach(o => o.remove());
+    const overlay = _el('div', 've-dialog-overlay');
+    const dialog = _el('div', 've-dialog');
+    dialog.appendChild(_elText('div', '要素の背景色・文字色を変更', 've-dialog-title'));
+    const styles = JSON.parse(JSON.stringify(current || {}));
+    if (!targets || !targets.length) {
+      dialog.appendChild(_elText('div', '色を変更できる要素がありません。', 've-dialog-label'));
+    }
+    const list = _el('div', 'dve-color-list');
+    (targets || []).forEach((t) => {
+      const row = _el('div', 'dve-color-row');
+      row.appendChild(_elText('span', t.label || t.id, 'dve-color-name'));
+      const cur = styles[t.id] || {};
+      const mk = (key, label, def) => {
+        const field = _el('label', 'dve-color-field');
+        const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = !!cur[key];
+        const ci = document.createElement('input'); ci.type = 'color';
+        ci.value = _colorToHex(cur[key]) || def; ci.disabled = !chk.checked;
+        const commit = () => {
+          styles[t.id] = styles[t.id] || {};
+          if (chk.checked) styles[t.id][key] = ci.value; else delete styles[t.id][key];
+          if (!styles[t.id].bg && !styles[t.id].fg) delete styles[t.id];
+        };
+        chk.addEventListener('change', () => { ci.disabled = !chk.checked; commit(); });
+        ci.addEventListener('input', commit);
+        field.appendChild(chk);
+        field.appendChild(_elText('span', label, 'dve-color-lbl'));
+        field.appendChild(ci);
+        return field;
+      };
+      row.appendChild(mk('bg', '背景', '#1e1e1e'));
+      row.appendChild(mk('fg', '文字', '#ffffff'));
+      list.appendChild(row);
+    });
+    dialog.appendChild(list);
+    const actions = _el('div', 've-dialog-actions');
+    const cancel = _el('button', 've-dialog-cancel'); cancel.textContent = 'キャンセル';
+    cancel.addEventListener('click', () => overlay.remove());
+    const ok = _el('button', 've-dialog-ok'); ok.textContent = '適用';
+    ok.addEventListener('click', () => { overlay.remove(); onApply(styles); });
+    actions.appendChild(cancel); actions.appendChild(ok);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog); container.appendChild(overlay);
+  }
+  // Expose so the Class editor (in diagram-editors.js) can reuse them.
+  window.DiagramColor = { parseStyleColors: _parseStyleColors, showColorDialog: _showColorDialog };
+
   // ═══════════════════════════════════════════════════════════════════════════
   //  DiagramCommon — Step 1 cross-cutting infrastructure
   //  - onboarding banner (per-editor, dismissible, persisted)
@@ -426,6 +492,15 @@
       // Add click-to-connect button if subclass opted in
       this._maybeAddConnectButton();
 
+      // Element color button (subclasses that support per-element coloring).
+      if (this._colorSpec()) {
+        const colorBtn = _el('button', 'mve-tool-btn');
+        colorBtn.textContent = '🎨 色';
+        tooltip(colorBtn, '要素の背景色・文字色を変更');
+        colorBtn.addEventListener('click', () => this._openColorDialog());
+        this._toolbar.appendChild(colorBtn);
+      }
+
       // Zoom / pan controls (re-added since the toolbar was rebuilt above).
       if (window.DiagramZoom) window.DiagramZoom.addControls(this._toolbar, this);
 
@@ -528,6 +603,8 @@
           this._svgArea.innerHTML = svg;
           // Attach click-to-connect handlers after render if enabled
           this._maybeAttachSvgConnect();
+          // Click a node in the diagram to edit it directly.
+          this._attachSvgClickEdit();
           // Apply / fit zoom for the freshly rendered SVG.
           if (window.DiagramZoom) window.DiagramZoom.postRender(this);
         }).catch((err) => {
@@ -537,6 +614,116 @@
       } catch (err) {
         this._svgArea.innerHTML = '<div class="mermaid-error">プレビューエラー:\n' + _esc(err.message || err) + '</div>';
       }
+    }
+
+    // ─── Click-to-edit: click a node in the SVG to edit that list item ───
+    // Generic across every form-based editor: each list row already exposes an
+    // "編集" icon button, so we map the clicked SVG node's text back to the row
+    // that produced it and fire that button.
+    _attachSvgClickEdit() {
+      if (!this._svgArea || !this._listPanel) return;
+      const svgEl = this._svgArea.querySelector('svg');
+      if (!svgEl) return;
+
+      const rows = Array.from(this._listPanel.querySelectorAll('.dve-list-item'));
+      if (!rows.length) return;
+
+      // Candidate labels for each row: its input values first (most precise),
+      // then the row's own text.
+      const rowInfos = rows.map((row) => {
+        const labels = [];
+        row.querySelectorAll('input, textarea, select').forEach((f) => {
+          const v = (f.value || '').trim();
+          if (v) labels.push(v);
+        });
+        const t = (row.textContent || '').trim();
+        if (t) labels.push(t);
+        return { row, labels };
+      });
+
+      const findRow = (text) => {
+        if (!text) return null;
+        let hit = rowInfos.find(r => r.labels.some(l => l === text));
+        if (!hit) hit = rowInfos.find(r => r.labels.some(l => l && (l.includes(text) || text.includes(l))));
+        return hit ? hit.row : null;
+      };
+
+      // Map innermost <g> elements to a row (same approach as click-to-connect).
+      const matches = [];
+      svgEl.querySelectorAll('g').forEach((g) => {
+        const texts = g.querySelectorAll('text, foreignObject, title');
+        for (const t of texts) {
+          const txt = (t.textContent || '').trim();
+          if (!txt) continue;
+          const row = findRow(txt);
+          if (row) { matches.push({ g, row }); break; }
+        }
+      });
+      const allG = matches.map(m => m.g);
+      const innermost = matches.filter(m => !allG.some(o => o !== m.g && m.g.contains(o)));
+
+      innermost.forEach(({ g, row }) => {
+        g.querySelectorAll('rect, polygon, path, circle, ellipse, text').forEach((shape) => {
+          shape.style.pointerEvents = 'all';
+        });
+        if (g.dataset.dveEditBound) return;
+        g.dataset.dveEditBound = '1';
+        g.style.cursor = 'pointer';
+        if (!g.querySelector('title')) {
+          try {
+            const tip = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+            tip.textContent = 'クリックして編集';
+            g.appendChild(tip);
+          } catch (_e) { /* */ }
+        }
+        g.addEventListener('mouseenter', () => {
+          if (this._connectMode) return;
+          g.style.filter = 'brightness(1.15) drop-shadow(0 0 4px #007fd4)';
+        });
+        g.addEventListener('mouseleave', () => {
+          if (this._connectMode) return;
+          g.style.filter = '';
+        });
+        g.addEventListener('click', (e) => {
+          if (this._connectMode) return; // connect mode owns the click
+          e.stopPropagation();
+          e.preventDefault();
+          row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          row.classList.add('dve-row-flash');
+          setTimeout(() => row.classList.remove('dve-row-flash'), 900);
+          const editBtn = row.querySelector('.dve-icon-btn[title^="編集"]');
+          if (editBtn) { editBtn.click(); return; }
+          const field = row.querySelector('input, textarea, select');
+          if (field && typeof field.focus === 'function') { field.focus(); if (field.select) field.select(); }
+        });
+      });
+    }
+
+    // ─── Element color (background / text) ───────────────────────────────
+    // Editors that support per-element coloring override _colorSpec() to return
+    //   { targets(): [{id,label}], format(styles): [lines], strip(code): {code,styles} }
+    _colorSpec() { return null; }
+    _extractStyles(code) {
+      const spec = this._colorSpec();
+      if (!spec) return code;
+      const res = spec.strip(code);
+      this.state.styles = res.styles || {};
+      return res.code;
+    }
+    _styleLines() {
+      const spec = this._colorSpec();
+      if (!spec || !this.state.styles) return [];
+      try { return spec.format(this.state.styles) || []; } catch (_e) { return []; }
+    }
+    _openColorDialog() {
+      const spec = this._colorSpec();
+      if (!spec || !window.DiagramColor) return;
+      this.state.styles = this.state.styles || {};
+      window.DiagramColor.showColorDialog(this.container, spec.targets() || [], this.state.styles, (styles) => {
+        this.state.styles = styles;
+        this._renderListAndPreview();
+        this._emit();
+      });
     }
 
     // ─── Click-to-connect mixin ──────────────────────────────────────────
@@ -742,7 +929,37 @@
     static template() {
       return 'stateDiagram-v2\n    [*] --> Idle\n    Idle --> Active : start\n    Active --> Idle : stop\n    Active --> [*]';
     }
+    _colorSpec() {
+      const self = this;
+      return {
+        targets() { return (self.state.states || []).map(s => ({ id: s, label: s })); },
+        format(styles) {
+          const out = [];
+          for (const id in styles) {
+            const c = styles[id]; const p = [];
+            if (c.bg) p.push('fill:' + c.bg);
+            if (c.fg) p.push('color:' + c.fg);
+            if (!p.length) continue;
+            out.push('    classDef sty_' + id + ' ' + p.join(','));
+            out.push('    class ' + id + ' sty_' + id);
+          }
+          return out;
+        },
+        strip(code) {
+          const styles = {}; const keep = [];
+          for (const ln of code.split('\n')) {
+            const t = ln.trim();
+            const m = t.match(/^classDef\s+sty_(\w+)\s+(.+)$/);
+            if (m) { styles[m[1]] = _parseStyleColors(m[2]); continue; }
+            if (/^class\s+\w+\s+sty_\w+\s*$/.test(t)) continue;
+            keep.push(ln);
+          }
+          return { code: keep.join('\n'), styles };
+        }
+      };
+    }
     _parse(code) {
+      code = this._extractStyles(code);
       const lines = code.split('\n').map(l => l.trim()).filter(Boolean);
       const states = new Set();
       const transitions = [];
@@ -778,6 +995,7 @@
       for (const t of (this.state.transitions || [])) {
         lines.push('    ' + t.from + ' --> ' + t.to + (t.label ? ' : ' + t.label : ''));
       }
+      lines.push(...this._styleLines());
       return lines.join('\n');
     }
     _sections() {
@@ -1592,7 +1810,41 @@
     static template() {
       return 'C4Context\n    title システムコンテキスト図\n    Person(user, "ユーザー", "システム利用者")\n    System(sys, "本システム", "メインシステム")\n    Rel(user, sys, "利用する")';
     }
+    _colorSpec() {
+      const self = this;
+      return {
+        targets() { return (self.state.elements || []).map(e => ({ id: e.id, label: e.label || e.id })); },
+        format(styles) {
+          const out = [];
+          for (const id in styles) {
+            const c = styles[id]; const p = [];
+            if (c.bg) p.push('$bgColor="' + c.bg + '"');
+            if (c.fg) p.push('$fontColor="' + c.fg + '"');
+            if (!p.length) continue;
+            out.push('    UpdateElementStyle(' + id + ', ' + p.join(', ') + ')');
+          }
+          return out;
+        },
+        strip(code) {
+          const styles = {}; const keep = [];
+          for (const ln of code.split('\n')) {
+            const m = ln.trim().match(/^UpdateElementStyle\(\s*(\w+)\s*,(.+)\)\s*$/);
+            if (m) {
+              const c = {};
+              const bg = m[2].match(/\$bgColor\s*=\s*"([^"]+)"/);
+              if (bg) c.bg = bg[1];
+              const fg = m[2].match(/\$fontColor\s*=\s*"([^"]+)"/);
+              if (fg) c.fg = fg[1];
+              styles[m[1]] = c; continue;
+            }
+            keep.push(ln);
+          }
+          return { code: keep.join('\n'), styles };
+        }
+      };
+    }
     _parse(code) {
+      code = this._extractStyles(code);
       const lines = code.split('\n');
       this.state.kind = 'C4Context';
       this.state.title = '';
@@ -1622,6 +1874,7 @@
       for (const r of this.state.relations) {
         lines.push('    Rel(' + r.from + ', ' + r.to + ', "' + r.label + '"' + (r.tech ? ', "' + r.tech + '"' : '') + ')');
       }
+      lines.push(...this._styleLines());
       return lines.join('\n');
     }
     _sections() {
@@ -2118,7 +2371,45 @@
     static template() {
       return 'block-beta\n    columns 3\n    A B C\n    D E F';
     }
+    _colorSpec() {
+      const self = this;
+      const RESERVED = /^(block|columns|space|down|up|left|right|end)$/i;
+      const ids = () => {
+        const set = new Set();
+        for (const ln of (self.state.lines || [])) {
+          for (const tok of ln.split(/\s+/)) {
+            const m = tok.match(/^([A-Za-z0-9_]+)/);
+            if (m && !RESERVED.test(m[1])) set.add(m[1]);
+          }
+        }
+        return Array.from(set);
+      };
+      return {
+        targets() { return ids().map(id => ({ id, label: id })); },
+        format(styles) {
+          const out = [];
+          for (const id in styles) {
+            const c = styles[id]; const p = [];
+            if (c.bg) p.push('fill:' + c.bg);
+            if (c.fg) p.push('color:' + c.fg);
+            if (!p.length) continue;
+            out.push('    style ' + id + ' ' + p.join(','));
+          }
+          return out;
+        },
+        strip(code) {
+          const styles = {}; const keep = [];
+          for (const ln of code.split('\n')) {
+            const m = ln.trim().match(/^style\s+([A-Za-z0-9_]+)\s+(.+)$/);
+            if (m) { styles[m[1]] = _parseStyleColors(m[2]); continue; }
+            keep.push(ln);
+          }
+          return { code: keep.join('\n'), styles };
+        }
+      };
+    }
     _parse(code) {
+      code = this._extractStyles(code);
       this.state.columns = 3;
       this.state.lines = [];
       const lines = code.split('\n');
@@ -2134,6 +2425,7 @@
       const out = ['block-beta'];
       out.push('    columns ' + (this.state.columns || 3));
       for (const l of this.state.lines) out.push('    ' + l);
+      out.push(...this._styleLines());
       return out.join('\n');
     }
     _sections() {

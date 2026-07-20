@@ -1381,8 +1381,8 @@
     destroy() { _destroyUndoKeyboard(this); this.container.innerHTML = ''; }
     getCode() { return this._generate(); }
 
-    _snapshot() { return { classes: JSON.parse(JSON.stringify(this.classes)), relations: JSON.parse(JSON.stringify(this.relations)) }; }
-    _restoreSnapshot(snap) { this.classes = snap.classes; this.relations = snap.relations; }
+    _snapshot() { return { classes: JSON.parse(JSON.stringify(this.classes)), relations: JSON.parse(JSON.stringify(this.relations)), classStyles: JSON.parse(JSON.stringify(this.classStyles || {})) }; }
+    _restoreSnapshot(snap) { this.classes = snap.classes; this.relations = snap.relations; this.classStyles = snap.classStyles || {}; }
     _doUndo() { const s = this._undo.undo(); if (s) { this._restoreSnapshot(s); this._render(true); } }
     _doRedo() { const s = this._undo.redo(); if (s) { this._restoreSnapshot(s); this._render(true); } }
     _deleteSelected() {
@@ -1398,11 +1398,16 @@
     }
 
     _parse(code) {
-      this.classes = []; this.relations = [];
+      this.classes = []; this.relations = []; this.classStyles = {};
       const lines = code.split('\n'); let currentClass = null;
       for (const line of lines) {
         const t = line.trim();
         if (!t || t === 'classDiagram' || t.startsWith('%%')) continue;
+        const styleLine = t.match(/^style\s+(\w+)\s+(.+)$/);
+        if (styleLine && window.DiagramColor) {
+          this.classStyles[styleLine[1]] = window.DiagramColor.parseStyleColors(styleLine[2]);
+          continue;
+        }
         const classBlock = t.match(/^class\s+(\w+)\s*\{?\s*$/);
         if (classBlock) { currentClass = { name: classBlock[1], properties: [], methods: [] }; this.classes.push(currentClass); continue; }
         if (t === '}') { currentClass = null; continue; }
@@ -1453,7 +1458,23 @@
         let line = '    ' + rel.from + ' ' + (syn[rel.type] || '-->') + ' ' + rel.to;
         if (rel.label) line += ' : ' + rel.label; lines.push(line);
       }
+      for (const name in (this.classStyles || {})) {
+        const c = this.classStyles[name]; const p = [];
+        if (c.bg) p.push('fill:' + c.bg);
+        if (c.fg) p.push('color:' + c.fg);
+        if (p.length) lines.push('    style ' + name + ' ' + p.join(','));
+      }
       return lines.join('\n');
+    }
+
+    _openColorDialog() {
+      if (!window.DiagramColor) return;
+      this.classStyles = this.classStyles || {};
+      const targets = this.classes.map(c => ({ id: c.name, label: c.name }));
+      window.DiagramColor.showColorDialog(this.container, targets, this.classStyles, (styles) => {
+        this.classStyles = styles;
+        this._render();
+      });
     }
 
     _buildUI() {
@@ -1473,6 +1494,11 @@
       const addRelBtn = _el('button', 'mve-tool-btn'); addRelBtn.textContent = '➕ 関連追加';
       addRelBtn.addEventListener('click', () => this._addRelation());
       toolbar.appendChild(addRelBtn);
+
+      const colorBtn = _el('button', 'mve-tool-btn'); colorBtn.textContent = '🎨 色';
+      colorBtn.title = 'クラスの背景色・文字色を変更';
+      colorBtn.addEventListener('click', () => this._openColorDialog());
+      toolbar.appendChild(colorBtn);
 
       toolbar.appendChild(_elText('span', '図上のクラスをクリックして接続', 'dve-hint'));
 
