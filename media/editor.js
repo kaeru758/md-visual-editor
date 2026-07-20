@@ -8,6 +8,10 @@
   let editingBlockIndex = -1;
   /** Token range {start,end} of the section/text block being edited (null = special/none) */
   let _editingRange = null;
+  /** Exact original markdown of the range being edited (for no-op detection) */
+  let _editingOriginalRaw = null;
+  /** Trailing whitespace stripped from the textarea, re-attached verbatim on finish */
+  let _editingTrailing = null;
   /** Counter for unique mermaid element IDs */
   let mermaidCounter = 0;
   /** Flag to prevent blur-triggered finish when toolbar is clicked */
@@ -1163,8 +1167,13 @@
     // Section/text block: edit the whole H1/H2 section's markdown at once.
     const range = rangeOf(tokenIndex);
     _editingRange = range;
-    // Remove trailing newline(s) for nicer editing
-    const rawText = rawOfRange(range).replace(/\n+$/, '');
+    // Hide trailing newline(s) while editing, but remember them verbatim so an
+    // untouched block round-trips byte-for-byte (otherwise the blank line that
+    // separates this block from the next would be silently dropped).
+    const rangeRaw = rawOfRange(range);
+    const rawText = rangeRaw.replace(/\n+$/, '');
+    _editingOriginalRaw = rangeRaw;
+    _editingTrailing = rangeRaw.slice(rawText.length);
     // Snapshot original text for dirty-check on cancel
     const originalText = rawText;
 
@@ -1251,6 +1260,8 @@
     if (!blockEl) {
       editingBlockIndex = -1;
       _editingRange = null;
+      _editingOriginalRaw = null;
+      _editingTrailing = null;
       return;
     }
 
@@ -1259,13 +1270,35 @@
     // Section / text block: re-lex the edited markdown and splice it back in
     // place, then re-render fully (its block structure may have changed).
     if (range && textarea) {
-      let newRaw = textarea.value;
-      if (!newRaw.endsWith('\n')) newRaw += '\n';
+      // Re-attach the original trailing newlines verbatim so leaving an
+      // untouched block never rewrites the document.
+      const trailing = (_editingTrailing != null) ? _editingTrailing : '\n';
+      const originalRaw = (_editingOriginalRaw != null) ? _editingOriginalRaw : rawOfRange(range);
+      const newRaw = textarea.value + trailing;
+      editingBlockIndex = -1;
+      _editingRange = null;
+      _editingOriginalRaw = null;
+      _editingTrailing = null;
+
+      if (newRaw === originalRaw) {
+        // Nothing changed — just leave edit mode. Skipping the document edit
+        // keeps VS Code from marking the tab as unsaved.
+        blockEl.classList.remove('editing');
+        const single = _isSpecialTokenType(allTokens[range.start]) || (range.end - range.start === 1);
+        const rep = single ? allTokens[range.start] : { type: 'section', raw: originalRaw };
+        renderBlockContent(blockEl, rep, range.start);
+        updateChangedHighlights();
+        if (restoreFocus) {
+          replaceBlockSelection([range.start]);
+          blockEl.focus();
+          blockEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+        return;
+      }
+
       const before = allTokens.slice(0, range.start).map(t => t.raw).join('');
       const after = allTokens.slice(range.end).map(t => t.raw).join('');
       const fullText = before + newRaw + after;
-      editingBlockIndex = -1;
-      _editingRange = null;
       sendEdit(fullText);
       handleDocumentUpdate(fullText);
       if (restoreFocus) {
@@ -1281,6 +1314,7 @@
 
     // Legacy single-token path (special blocks cleaned up above have no textarea).
     const token = allTokens[tokenIndex];
+    const prevRaw = token ? token.raw : null;
     if (textarea && token) {
       let newRaw = textarea.value;
       if (!newRaw.endsWith('\n')) newRaw += '\n';
@@ -1289,6 +1323,8 @@
 
     editingBlockIndex = -1;
     _editingRange = null;
+    _editingOriginalRaw = null;
+    _editingTrailing = null;
 
     blockEl.classList.remove('editing');
     if (token) renderBlockContent(blockEl, token, tokenIndex);
@@ -1297,7 +1333,11 @@
       requestAnimationFrame(() => renderMermaidDiagrams());
     }
 
-    sendEdit(getFullMarkdown());
+    // Only touch the document when the block actually changed (e.g. switching
+    // away from an unmodified table / Mermaid editor must not dirty the file).
+    if (token && prevRaw !== token.raw) {
+      sendEdit(getFullMarkdown());
+    }
 
     if (restoreFocus) {
       replaceBlockSelection([tokenIndex]);
