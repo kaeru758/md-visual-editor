@@ -3,7 +3,6 @@
 > 対象バージョン: **v0.4.1** / Mermaid 11.14.x / 21 種類対応
 
 ---
-![disney_40th](images/disney_40th.jpg)
 ## 0. テスト前の確認
 - [ ] VS Code 1.80.0 以上
 - [ ] 拡張機能 `md-visual-editor-0.4.1.vsix` がインストール済み
