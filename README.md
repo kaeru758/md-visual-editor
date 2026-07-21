@@ -1,6 +1,6 @@
 # Markdown Visual Editor
 
-[![Version 0.5.6](https://img.shields.io/badge/version-0.5.6-blue.svg)](CHANGELOG.md)
+[![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![No Telemetry](https://img.shields.io/badge/telemetry-none-brightgreen.svg)](#privacy--security)
 [![100% Local](https://img.shields.io/badge/network-offline-blue.svg)](#privacy--security)
@@ -342,7 +342,7 @@ ext install <publisher>.md-visual-editor
 ### VSIX ファイルからインストール
 
 ```powershell
-code --install-extension md-visual-editor-0.5.6.vsix
+code --install-extension md-visual-editor-1.0.0.vsix
 ```
 
 または VS Code のコマンドパレット (`Ctrl+Shift+P`) で「**Extensions: Install from VSIX...**」を選択し、`.vsix` ファイルを指定してください。

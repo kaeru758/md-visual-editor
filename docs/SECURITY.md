@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 |---|---|
 | ドキュメントバージョン | 3.0 |
-| 対象拡張機能 | Markdown Visual Editor v0.5.6 |
+| 対象拡張機能 | Markdown Visual Editor v1.0.0 |
 | 作成日 | 2026-04-10 |
 | 最終レビュー日 | 2026-07-19 |
 | レビュー対象ファイル | `src/extension.ts`, `src/markdownVisualEditorProvider.ts`, `media/editor.js`, `media/mermaid-visual-editor.js`, `media/diagram-editors.js`, `media/extra-diagram-editors.js`, `media/editor.css`, `package.json`, `esbuild.mjs` |
@@ -126,7 +126,7 @@
 
 ### 3.2 Content Security Policy (CSP) の実測値
 
-WebView HTML には以下の CSP が設定されている（v0.5.6 時点で `src/markdownVisualEditorProvider.ts` の `getHtmlForWebview()` から実測）。
+WebView HTML には以下の CSP が設定されている（v1.0.0 時点で `src/markdownVisualEditorProvider.ts` の `getHtmlForWebview()` から実測）。
 
 ```
 Content-Security-Policy:
@@ -335,7 +335,7 @@ mermaid.initialize({
 
 ## 6. メッセージパッシングのセキュリティ
 
-### 6.1 メッセージ型の一覧（v0.5.6 時点で9種類 + Host→WebView 4種類）
+### 6.1 メッセージ型の一覧（v1.0.0 時点で9種類 + Host→WebView 4種類）
 
 > **v0.4.1 時点の本ドキュメントは「ホストが処理するメッセージは以下4種類のみ」（`edit`/`ready`/`openLink`/`openAsText`）と記載していたが、現在は9種類に増えている。** 以下は `markdownVisualEditorProvider.ts` の `onDidReceiveMessage` ハンドラを完全に書き出したものである。
 
@@ -687,4 +687,4 @@ vscode.postMessage({ type: 'edit', text: '悪意のあるテキスト' });
 3. **PDF出力はVS Codeのサンドボックス・CSPの外でコンテンツを描画する** — これは受容すべき既知の制限であり、機密文書利用時は注意が必要（§4.4・§12）
 4. **多層防御は健在だが完全ではない** — HTMLサニタイズ（denylist方式）+ CSP + nonce + Mermaid内部サニタイズ + KaTeX `trust:false` + WebViewサンドボックスによる防御は機能しているが、denylist方式である点とPDF出力がこの防御の外にある点は明記すべき限界である
 5. **データを能動的に外部送信しないが、非保持ではない** — クリップボード・PDF一時ファイル・`localStorage`のオンボーディングフラグ・WebView `setState`のテーマ設定など、ドキュメント内容またはUI状態の一部がプロセス外の永続領域に置かれる経路が複数存在する（§8）
-6. **透明性** — 全ソースコードが閲覧可能であり、本ドキュメントは v0.5.6（HEAD `13699c4`）時点のソースコードを実地検証して記載している
+6. **透明性** — 全ソースコードが閲覧可能であり、本ドキュメントは v1.0.0（HEAD `20e4f6b`）時点のソースコードを実地検証して記載している

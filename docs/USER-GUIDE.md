@@ -51,7 +51,7 @@
 
 > コマンドラインからもインストールできます:
 > ```powershell
-> code --install-extension md-visual-editor-0.5.6.vsix
+> code --install-extension md-visual-editor-1.0.0.vsix
 > ```
 
 ### インストール確認

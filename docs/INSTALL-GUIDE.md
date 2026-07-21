@@ -89,7 +89,7 @@ Get-ChildItem *.vsix
 ### 生成されるファイル例
 
 ```
-md-visual-editor-0.5.6.vsix
+md-visual-editor-1.0.0.vsix
 ```
 
 ---
@@ -104,7 +104,7 @@ md-visual-editor-0.5.6.vsix
 
 ```
 \\共有サーバー\tools\md-visual-editor\
-  ├── md-visual-editor-0.5.6.vsix    ← VSIXファイル
+  ├── md-visual-editor-1.0.0.vsix    ← VSIXファイル
   └── USER-GUIDE.md                  ← 利用者向けガイド（コピー）
 ```
 
