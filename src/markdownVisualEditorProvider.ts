@@ -295,17 +295,32 @@ export class MarkdownVisualEditorProvider implements vscode.CustomTextEditorProv
   }
   /* Mermaid: keep the natural size when it fits, scale down when it
      overflows. Avoid stretching small SVGs to the container width. */
+  /* Defensively neutralize the live preview's zoom/pan viewport so tall
+     diagrams are never clipped in the PDF. editor.css is linked here, and its
+     `.mermaid-zoomable` rules (overflow:hidden + max-height:70vh) plus any
+     leftover pan transform would otherwise cut diagrams off at the bottom. */
+  #print-root .mermaid-container,
+  #print-root .mermaid-container.mermaid-zoomable {
+    overflow: visible !important;
+    max-height: none !important;
+    height: auto !important;
+  }
+  #print-root .mermaid-zoom-controls { display: none !important; }
   #print-root .mermaid-diagram {
     background: transparent !important;
     padding: 8px 0 !important;
     overflow: visible !important;
     display: block !important;
     text-align: center;
+    transform: none !important;
+    height: auto !important;
+    max-height: none !important;
   }
   #print-root .mermaid-diagram svg {
     max-width: 100% !important;
     max-height: 90vh !important;
     height: auto !important;
+    transform: none !important;
     display: inline-block;
   }
   #print-root img {

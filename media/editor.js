@@ -3059,6 +3059,22 @@
       for (const el of diagrams) {
         const code = el.getAttribute('data-mermaid-code');
         if (!code) continue;
+        // Neutralize the live preview's zoom/pan viewport so the exported PDF
+        // shows the whole diagram. Without this, the `.mermaid-zoomable`
+        // container (overflow:hidden + max-height:70vh) and any leftover pan
+        // transform clip tall diagrams at the bottom.
+        const container = el.closest('.mermaid-container');
+        if (container) {
+          container.classList.remove('mermaid-zoomable', 'mermaid-panning');
+          container.querySelectorAll('.mermaid-zoom-controls').forEach(n => n.remove());
+          container.style.removeProperty('overflow');
+          container.style.removeProperty('max-height');
+          container.style.removeProperty('height');
+        }
+        el.style.removeProperty('transform');
+        el.style.removeProperty('height');
+        el.style.removeProperty('width');
+        el.style.removeProperty('will-change');
         const rid = 'mdve-pdf-mmd-' + Date.now() + '-' + (i++);
         try {
           // @ts-ignore
