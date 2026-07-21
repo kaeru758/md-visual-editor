@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.2 — 2026-07-22
+
+### 修正
+
+- **PDF 出力が「zoomable is not defined」で失敗する不具合を修正** — PDF 用 HTML を生成するテンプレートリテラル内のコメントで `.mermaid-zoomable` がバッククォートで囲まれており、外側のテンプレートリテラルを途中で閉じてしまっていました。その結果 `.mermaid-zoomable` が JavaScript（未定義変数 `zoomable` を含む式）として解釈され、PDF 出力実行時に `ReferenceError: zoomable is not defined` を送出していました。コメント内のバッククォートを除去して修正しました。
+
 ## v1.0.1 — 2026-07-22
 
 ### 修正

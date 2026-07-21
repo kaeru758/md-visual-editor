@@ -297,7 +297,7 @@ export class MarkdownVisualEditorProvider implements vscode.CustomTextEditorProv
      overflows. Avoid stretching small SVGs to the container width. */
   /* Defensively neutralize the live preview's zoom/pan viewport so tall
      diagrams are never clipped in the PDF. editor.css is linked here, and its
-     `.mermaid-zoomable` rules (overflow:hidden + max-height:70vh) plus any
+     .mermaid-zoomable rules (overflow:hidden + max-height:70vh) plus any
      leftover pan transform would otherwise cut diagrams off at the bottom. */
   #print-root .mermaid-container,
   #print-root .mermaid-container.mermaid-zoomable {
