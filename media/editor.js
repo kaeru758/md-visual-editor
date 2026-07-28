@@ -794,6 +794,8 @@
         if (e.target.tagName === 'A') return;
         if (e.target.closest('.mermaid-edit-overlay')) return;
         if (e.target.closest('.block-drag-handle')) return;
+        // Double-clicking the mermaid zoom / pan controls must not open the editor.
+        if (e.target.closest('.mermaid-zoom-controls')) return;
         startEditing(index);
       });
 
@@ -856,6 +858,51 @@
     updateChangedHighlights();
   }
 
+  // Enter inside a list item: continue the list on the next line, matching the
+  // indent and marker (bullets, numbers, task boxes). Pressing Enter on an
+  // empty item ends the list. Returns true if it handled the key.
+  function applyListContinuation(ta) {
+    if (ta.selectionStart !== ta.selectionEnd) return false; // has a selection
+    const value = ta.value;
+    const caret = ta.selectionStart;
+    const lineStart = value.lastIndexOf('\n', caret - 1) + 1;
+    let lineEnd = value.indexOf('\n', caret);
+    if (lineEnd < 0) lineEnd = value.length;
+    const line = value.slice(lineStart, lineEnd);
+    const m = line.match(/^(\s*)([-*+]|\d+[.)])[ \t]+(\[[ xX]\][ \t]+)?(.*)$/);
+    if (!m) return false;
+    const indent = m[1], marker = m[2], checkbox = m[3], content = m[4];
+    const isEmptyItem = content.trim() === '' && caret >= lineStart + line.length;
+    if (isEmptyItem) {
+      // Empty item + Enter → remove the marker (end/outdent the list).
+      ta.value = value.slice(0, lineStart) + value.slice(lineEnd);
+      ta.selectionStart = ta.selectionEnd = lineStart;
+      return true;
+    }
+    let nextMarker;
+    const om = marker.match(/^(\d+)([.)])$/);
+    if (om) nextMarker = (parseInt(om[1], 10) + 1) + om[2];
+    else nextMarker = marker;
+    const prefix = '\n' + indent + nextMarker + ' ' + (checkbox ? '[ ] ' : '');
+    ta.value = value.slice(0, caret) + prefix + value.slice(caret);
+    ta.selectionStart = ta.selectionEnd = caret + prefix.length;
+    return true;
+  }
+
+  // Render markdown to HTML for preview, with small display-only fixups.
+  function _renderMarkdown(md) {
+    // A bullet whose only content is a thematic-break sequence (`- ***`,
+    // `- ---`, `- ___`) is turned into an <hr> by CommonMark. Users expect it
+    // to stay a bullet, so escape the markers for display only (the stored
+    // markdown is untouched). Standalone `***` / `---` lines still become <hr>.
+    const fixed = String(md == null ? '' : md).replace(
+      /^(\s*[-*+]\s+)(\*{3,}|-{3,}|_{3,})(\s*)$/gm,
+      (_m, bullet, marks, tail) => bullet + marks.replace(/[-*_]/g, '\\$&') + tail
+    );
+    // @ts-ignore
+    return marked.parse(fixed);
+  }
+
   function renderBlockContent(container, token, index) {
     container.innerHTML = '';
 
@@ -899,7 +946,7 @@
       // Render table normally but add edit overlay
       try {
         // @ts-ignore
-        const html = marked.parse(token.raw);
+        const html = _renderMarkdown(token.raw);
         contentDiv.innerHTML = sanitizeHtml(html);
       } catch (err) {
         contentDiv.innerHTML = '<pre class="raw-block">' + escapeHtml(token.raw) + '</pre>';
@@ -917,7 +964,7 @@
     } else {
       try {
         // @ts-ignore
-        const html = marked.parse(token.raw);
+        const html = _renderMarkdown(token.raw);
         if (html.trim()) {
           contentDiv.innerHTML = sanitizeHtml(html);
         } else {
@@ -960,26 +1007,38 @@
 
     const clamp = (z) => Math.max(0.2, Math.min(4, z));
     let st = container.__mzp;
+    // Natural (intrinsic) size of the SVG so we can resize it — rather than
+    // CSS-scale it — which keeps text vector-crisp at any zoom level.
+    const getNatural = () => {
+      const svg = host.querySelector('svg');
+      if (!svg) return null;
+      const vb = svg.viewBox && svg.viewBox.baseVal;
+      if (vb && vb.width > 0 && vb.height > 0) return { svg, w: vb.width, h: vb.height };
+      const prevW = svg.style.width, prevH = svg.style.height;
+      svg.style.width = ''; svg.style.height = '';
+      const bb = svg.getBoundingClientRect();
+      svg.style.width = prevW; svg.style.height = prevH;
+      return { svg, w: bb.width || 300, h: bb.height || 150 };
+    };
     const apply = () => {
-      host.style.transformOrigin = 'top center';
-      if (st.z === 1 && st.px === 0 && st.py === 0) {
-        host.style.transform = '';
-      } else {
-        host.style.transform = 'translate(' + st.px + 'px,' + st.py + 'px) scale(' + st.z + ')';
+      const n = getNatural();
+      if (n) {
+        // Resize the SVG itself (vector), then only translate for panning.
+        n.svg.style.maxWidth = 'none';
+        n.svg.style.width = (n.w * st.z) + 'px';
+        n.svg.style.height = (n.h * st.z) + 'px';
       }
+      host.style.transformOrigin = 'top center';
+      host.style.transform = (st.px || st.py) ? ('translate(' + st.px + 'px,' + st.py + 'px)') : '';
       if (st.label) st.label.textContent = Math.round(st.z * 100) + '%';
     };
     const fit = () => {
       st.px = 0; st.py = 0; st.z = 1;
-      host.style.transform = 'none';
-      const svg = host.querySelector('svg');
-      if (svg) {
-        const sr = svg.getBoundingClientRect();
+      const n = getNatural();
+      if (n) {
         const cr = container.getBoundingClientRect();
-        if (sr.width > 0 && sr.height > 0) {
-          const s = Math.min((cr.width - 16) / sr.width, (cr.height - 16) / sr.height);
-          st.z = clamp(s < 1 ? s : 1); // only shrink to fit; keep small diagrams at 100%
-        }
+        const s = Math.min((cr.width - 16) / n.w, (cr.height - 16) / n.h);
+        st.z = clamp(s < 1 ? s : 1); // only shrink to fit; keep small diagrams at 100%
       }
       apply();
     };
@@ -1036,6 +1095,8 @@
           if (st.justDragged) return; // came from a drag, not a click
           fn();
         });
+        // Rapid clicks register as dblclick; don't let it reach the block.
+        b.addEventListener('dblclick', (e) => { e.stopPropagation(); e.preventDefault(); });
         parent.appendChild(b);
         return b;
       };
@@ -1223,6 +1284,13 @@
       } else if (e.key === 'Enter' && e.ctrlKey) {
         e.preventDefault();
         finishEditing(true);
+      } else if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.metaKey && !e.isComposing) {
+        // List continuation (plain Enter). Falls through to a normal newline
+        // when the current line isn't a list item.
+        if (applyListContinuation(textarea)) {
+          e.preventDefault();
+          autoResizeTextarea(textarea);
+        }
       } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.altKey) {
         // Commit this block and jump straight into editing the adjacent one.
         e.preventDefault();
