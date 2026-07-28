@@ -411,7 +411,15 @@ body {
 .mermaid-container.mermaid-zoomable .mermaid-diagram {
   overflow: visible;
   cursor: grab;
-  will-change: transform;
+  /* No `will-change: transform` here: it forces a rasterized GPU layer that
+     blurs the SVG when zoomed. Zoom now resizes the SVG (vector-crisp) and
+     only pans via translate. */
+}
+/* Keep SVG text crisp at any zoom (belt-and-suspenders). */
+.mermaid-container.mermaid-zoomable .mermaid-diagram svg,
+.mermaid-container.mermaid-zoomable .mermaid-diagram svg * {
+  shape-rendering: geometricPrecision;
+  text-rendering: geometricPrecision;
 }
 .mermaid-container.mermaid-zoomable.mermaid-panning .mermaid-diagram {
   cursor: grabbing;
