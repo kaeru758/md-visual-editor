@@ -889,18 +889,47 @@
     return true;
   }
 
+  // Tab / Shift+Tab on a list line indents / outdents the whole line (nest
+  // deeper / shallower). Returns true if handled (i.e. the line is a list item).
+  function applyListIndent(ta, outdent) {
+    const value = ta.value;
+    const caret = ta.selectionStart;
+    const lineStart = value.lastIndexOf('\n', caret - 1) + 1;
+    let lineEnd = value.indexOf('\n', caret);
+    if (lineEnd < 0) lineEnd = value.length;
+    const line = value.slice(lineStart, lineEnd);
+    if (!/^\s*([-*+]|\d+[.)])(\s|$)/.test(line)) return false; // not a list item line
+    if (outdent) {
+      const m = line.match(/^( {1,4}|\t)/);
+      if (!m) return true; // list line, nothing to outdent — still consume Tab
+      const rem = m[1].length;
+      ta.value = value.slice(0, lineStart) + value.slice(lineStart + rem);
+      ta.selectionStart = ta.selectionEnd = Math.max(lineStart, caret - rem);
+    } else {
+      ta.value = value.slice(0, lineStart) + '    ' + value.slice(lineStart);
+      ta.selectionStart = ta.selectionEnd = caret + 4;
+    }
+    return true;
+  }
+
   // Render markdown to HTML for preview, with small display-only fixups.
   function _renderMarkdown(md) {
+    let s = String(md == null ? '' : md);
     // A bullet whose only content is a thematic-break sequence (`- ***`,
     // `- ---`, `- ___`) is turned into an <hr> by CommonMark. Users expect it
     // to stay a bullet, so escape the markers for display only (the stored
     // markdown is untouched). Standalone `***` / `---` lines still become <hr>.
-    const fixed = String(md == null ? '' : md).replace(
+    s = s.replace(
       /^(\s*[-*+]\s+)(\*{3,}|-{3,}|_{3,})(\s*)$/gm,
       (_m, bullet, marks, tail) => bullet + marks.replace(/[-*_]/g, '\\$&') + tail
     );
+    // Drop trailing empty list-item markers (a lone `- ` on the final line(s),
+    // commonly left by the list-continuation helper). Otherwise the trailing
+    // bare `-` is misread as a setext-heading underline and the (nested) list
+    // collapses into an <h2>.
+    s = s.replace(/(?:\r?\n[ \t]*(?:[-*+]|\d+[.)])[ \t]*)+[ \t]*$/, '');
     // @ts-ignore
-    return marked.parse(fixed);
+    return marked.parse(s);
   }
 
   function renderBlockContent(container, token, index) {
@@ -1303,10 +1332,14 @@
         applyFormatting(textarea, 'italic');
       } else if (e.key === 'Tab') {
         e.preventDefault();
-        const start = textarea.selectionStart;
-        const end = textarea.selectionEnd;
-        textarea.value = textarea.value.substring(0, start) + '    ' + textarea.value.substring(end);
-        textarea.selectionStart = textarea.selectionEnd = start + 4;
+        // On a list line, Tab/Shift+Tab nests/un-nests the item; elsewhere Tab
+        // inserts spaces (Shift+Tab is a no-op there).
+        if (!applyListIndent(textarea, e.shiftKey) && !e.shiftKey) {
+          const start = textarea.selectionStart;
+          const end = textarea.selectionEnd;
+          textarea.value = textarea.value.substring(0, start) + '    ' + textarea.value.substring(end);
+          textarea.selectionStart = textarea.selectionEnd = start + 4;
+        }
         autoResizeTextarea(textarea);
       }
     });
