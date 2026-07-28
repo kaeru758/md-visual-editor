@@ -2134,6 +2134,25 @@
       }
       // Size textareas to their content once they're in the DOM.
       requestAnimationFrame(() => grownTextareas.forEach(_autoGrowTextarea));
+      // On first render, spread the columns across the full editing width so
+      // the table fills the available area instead of sitting at the default
+      // per-column widths. Users can still drag borders to override.
+      if (!this._colWidthsInit) {
+        requestAnimationFrame(() => {
+          this._colWidthsInit = true;
+          const wrap = this._tableEl.parentElement;
+          const avail = (wrap ? wrap.clientWidth : 0) - 34 /* row-actions col */ - 4;
+          const n = this.headers.length;
+          if (avail > 0 && n > 0) {
+            const current = this.colWidths.reduce((a, b) => a + (b || 0), 0);
+            if (current < avail) {
+              const each = Math.max(80, Math.floor(avail / n));
+              for (let i = 0; i < n; i++) this.colWidths[i] = each;
+              if (this._colEls) this._colEls.forEach((c, i) => { if (c) c.style.width = this.colWidths[i] + 'px'; });
+            }
+          }
+        });
+      }
     }
     _emitChange() { this.onChange(this._generate()); }
     _insertColumn(at) { const idx = Math.max(0, Math.min(at, this.headers.length)); this.headers.splice(idx, 0, '新列'); for (const r of this.rows) r.splice(idx, 0, ''); if (this.colWidths) this.colWidths.splice(idx, 0, 160); this._selectedCol = idx; this._renderTable(); this._emitChange(); }
