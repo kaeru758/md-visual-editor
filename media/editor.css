@@ -407,6 +407,10 @@ body {
   overflow: hidden;
   max-height: 70vh;
   border-radius: 4px;
+  /* Panning translates `.mermaid-diagram`, taking its background with it. Paint
+     the same background on the viewport so the block's selection colour doesn't
+     show through the area the diagram was panned away from. */
+  background-color: var(--vscode-editor-background);
 }
 .mermaid-container.mermaid-zoomable .mermaid-diagram {
   overflow: visible;
@@ -424,9 +428,14 @@ body {
 .mermaid-container.mermaid-zoomable.mermaid-panning .mermaid-diagram {
   cursor: grabbing;
 }
-/* Zoomed content should not be capped to the viewport width. */
+/* Zoomed content should not be capped to the viewport width.
+   `.mermaid-diagram` is a flex container, so the SVG is a flex item and would
+   otherwise be shrunk back to the container width (flex-shrink defaults to 1)
+   — which capped zoom at the drawing area's width. `flex: 0 0 auto` keeps the
+   width we set in JS and lets it overflow; panning brings it into view. */
 .mermaid-container.mermaid-zoomable .mermaid-diagram svg {
   max-width: none;
+  flex: 0 0 auto;
 }
 .mermaid-zoom-controls {
   position: absolute;

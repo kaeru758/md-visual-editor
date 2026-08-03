@@ -1053,7 +1053,11 @@
       const n = getNatural();
       if (n) {
         // Resize the SVG itself (vector), then only translate for panning.
+        // `flex: 0 0 auto` is essential: `.mermaid-diagram` is a flex container,
+        // so without it the SVG is shrunk back to the container width and zoom
+        // appears to stop at the drawing area's width.
         n.svg.style.maxWidth = 'none';
+        n.svg.style.flex = '0 0 auto';
         n.svg.style.width = (n.w * st.z) + 'px';
         n.svg.style.height = (n.h * st.z) + 'px';
       }
