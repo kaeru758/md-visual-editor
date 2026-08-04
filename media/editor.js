@@ -932,6 +932,46 @@
     return marked.parse(s);
   }
 
+  /** GitHub-style heading slug — mirrors marked's slugger closely enough to match. */
+  function _slugifyHeading(text) {
+    return String(text == null ? '' : text)
+      .trim()
+      .toLowerCase()
+      .replace(/[\u2000-\u206f\u2e00-\u2e7f\\'!"#$%&()*+,.\/:;<=>?@\[\]^`{|}~]/g, '')
+      .replace(/\s/g, '-');
+  }
+
+  /**
+   * Scroll to a heading referenced by `[…](#見出し)`. marked gives every heading
+   * an id, but each block is parsed on its own, so also fall back to matching a
+   * heading's visible text.
+   */
+  function scrollToAnchor(rawId) {
+    if (!rawId) return; // `[…](#)` intentionally does nothing
+    let id = rawId;
+    try { id = decodeURIComponent(rawId); } catch (e) { /* keep the raw form */ }
+    const editor = document.getElementById('editor');
+    if (!editor) return;
+
+    let target = null;
+    for (const candidate of [id, rawId]) {
+      try { target = editor.querySelector('#' + CSS.escape(candidate)); } catch (e) { target = null; }
+      if (target) break;
+    }
+    if (!target) {
+      const slug = _slugifyHeading(id);
+      const headings = editor.querySelectorAll('h1, h2, h3, h4, h5, h6');
+      for (const h of headings) {
+        if (h.id === slug || _slugifyHeading(h.textContent) === slug) { target = h; break; }
+      }
+    }
+    if (!target) return;
+
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    target.classList.add('anchor-flash');
+    setTimeout(() => target.classList.remove('anchor-flash'), 1200);
+  }
+
   function renderBlockContent(container, token, index) {
     container.innerHTML = '';
 
@@ -1010,7 +1050,13 @@
         e.preventDefault();
         e.stopPropagation();
         const href = a.getAttribute('href') || '';
-        if (href) vscode.postMessage({ type: 'openLink', href: href });
+        if (!href) return;
+        // In-document anchors stay here — the host has no view to scroll.
+        if (href.startsWith('#')) {
+          scrollToAnchor(href.slice(1));
+          return;
+        }
+        vscode.postMessage({ type: 'openLink', href: href });
       });
       a.title = (a.title ? a.title + ' — ' : '') + 'クリックで開く';
     });

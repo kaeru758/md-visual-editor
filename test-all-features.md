@@ -2,8 +2,8 @@
 > **使い方:** このファイルを Markdown Visual Editor で開き（右クリック → Open With... → Markdown Visual Editor、または §16 のタイトルバーボタン／コマンドパレット）、各セクションのチェックリストに従って動作を確認してください。
 > 対象バージョン: **v1.0.0** / Mermaid 11.14.x / 21 種類対応 / KaTeX 0.17.x
 > 最終更新: 2026-07-21
-
----
+[
+](URL)---
 
 - [ ] VS Code 1.80.0 以上
 - [ ] 拡張機能 `md-visual-editor-1.0.0.vsix` がインストール済み

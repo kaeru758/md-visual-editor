@@ -81,15 +81,14 @@ export class MarkdownVisualEditorProvider implements vscode.CustomTextEditorProv
           try {
             if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
               if (/^(https?|mailto):/i.test(href)) {
-                await vscode.env.openExternal(vscode.Uri.parse(href));
+                await openExternalUrl(href);
               } else {
                 await vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(href));
               }
             } else if (href.startsWith('#')) {
-              break;
+              break; // in-document anchors are scrolled by the webview itself
             } else {
-              const target = vscode.Uri.joinPath(document.uri, '..', href);
-              await vscode.commands.executeCommand('vscode.open', target);
+              await openDocumentRelativeLink(document, href);
             }
           } catch (e) {
             const detail = e instanceof Error ? e.message : String(e);
@@ -602,6 +601,92 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/**
+ * Open an http(s) / mailto link.
+ * `vscode.env.openExternal` reports failure by resolving to `false` instead of
+ * throwing, so ignoring its result made a failed launch indistinguishable from
+ * a dead link: no browser, no error, nothing. Check the result, retry through
+ * the OS protocol handler (the same reasoning as `openInDefaultApp` below), and
+ * always tell the user if both routes fail.
+ */
+async function openExternalUrl(url: string): Promise<void> {
+  let opened = false;
+  try {
+    opened = await vscode.env.openExternal(vscode.Uri.parse(url));
+  } catch {
+    opened = false;
+  }
+  if (opened) return;
+  if (await openUrlInDefaultApp(url)) return;
+  vscode.window.showWarningMessage(
+    `リンクを開けませんでした: ${url}\n理由: 既定のブラウザ／メールクライアントを起動できませんでした。`
+  );
+}
+
+/**
+ * Hand a URL to the OS protocol handler. Returns false if the opener could not
+ * even be spawned.
+ */
+function openUrlInDefaultApp(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      let command: string;
+      let args: string[];
+      if (process.platform === 'win32') {
+        // rundll32 passes the URL straight to the shell, so cmd.exe never gets
+        // to reinterpret `&` or `%xx` inside a query string / encoded path.
+        command = 'rundll32.exe';
+        args = ['url.dll,FileProtocolHandler', url];
+      } else if (process.platform === 'darwin') {
+        command = 'open';
+        args = [url];
+      } else {
+        command = 'xdg-open';
+        args = [url];
+      }
+      const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+      // Spawn failures (missing binary, blocked by policy) surface asynchronously.
+      child.on('error', () => resolve(false));
+      child.unref();
+      setTimeout(() => resolve(true), 150);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Resolve a document-relative link (`README.md`, `docs/a.md#使い方`, …) and open
+ * it in VS Code.
+ * marked percent-encodes hrefs, so `拡張機能要望.md` arrives as `%E6%8B%…`; that
+ * has to be decoded, and any `#fragment` split off, before joining onto the
+ * document's directory — otherwise the resolved path never exists.
+ */
+async function openDocumentRelativeLink(
+  document: vscode.TextDocument,
+  href: string
+): Promise<void> {
+  const hashAt = href.indexOf('#');
+  const rawPath = hashAt >= 0 ? href.slice(0, hashAt) : href;
+  if (!rawPath) return; // pure fragment — the webview handles it
+  let relPath = rawPath;
+  try {
+    relPath = decodeURIComponent(rawPath);
+  } catch {
+    // Malformed escape sequence — fall back to the raw text.
+  }
+  const target = vscode.Uri.joinPath(document.uri, '..', relPath);
+  try {
+    await vscode.workspace.fs.stat(target);
+  } catch {
+    vscode.window.showWarningMessage(
+      `リンク先が見つかりません: ${relPath}\n解決先: ${target.fsPath}`
+    );
+    return;
+  }
+  await vscode.commands.executeCommand('vscode.open', target);
 }
 
 /**
