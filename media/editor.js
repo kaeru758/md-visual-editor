@@ -2789,6 +2789,387 @@
     _fallbackCopy(text);
     return Promise.resolve();
   }
+
+  /**
+   * Copy both flavors in a single clipboard write: `text` as text/plain and
+   * `html` as text/html. Rich-text targets (PowerPoint / Word / Excel) read
+   * text/html and rebuild a real table; plain-text targets (VS Code's text
+   * editor, other markdown files) read text/plain and get the source back.
+   * Writing only text/plain — which navigator.clipboard.writeText does — is
+   * why a copied table used to arrive in PowerPoint as `| a | b |` text.
+   */
+  function _fallbackCopyRich(text, html) {
+    const onCopy = (e) => {
+      try {
+        e.clipboardData.setData('text/plain', text);
+        e.clipboardData.setData('text/html', html);
+        e.preventDefault();
+      } catch (_e) { /* */ }
+    };
+    // execCommand('copy') needs *something* selected before it will fire the
+    // copy event; the throwaway textarea provides that and the capture-phase
+    // listener then replaces the payload with both flavors.
+    document.addEventListener('copy', onCopy, true);
+    const activeEl = document.activeElement;
+    const sel = window.getSelection && window.getSelection();
+    const savedRange = (sel && sel.rangeCount) ? sel.getRangeAt(0).cloneRange() : null;
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_e) { /* */ }
+    document.body.removeChild(ta);
+    document.removeEventListener('copy', onCopy, true);
+    // Put focus and the caret back so block selection / shortcuts keep working.
+    try {
+      if (activeEl && typeof activeEl.focus === 'function') activeEl.focus({ preventScroll: true });
+      if (savedRange && sel) { sel.removeAllRanges(); sel.addRange(savedRange); }
+    } catch (_e) { /* */ }
+    return ok;
+  }
+
+  function writeClipboardRich(text, html) {
+    if (!html) return writeClipboard(text);
+    // Synchronous path first: it still runs inside the user gesture, which the
+    // async API may require.
+    if (_fallbackCopyRich(text, html)) return Promise.resolve();
+    try {
+      if (navigator.clipboard && navigator.clipboard.write && window.ClipboardItem) {
+        return navigator.clipboard.write([
+          new ClipboardItem({
+            'text/plain': new Blob([text], { type: 'text/plain' }),
+            'text/html': new Blob([html], { type: 'text/html' }),
+          }),
+        ]).catch((err) => {
+          console.warn('[Markdown Visual Editor] clipboard.write failed:', err);
+          return writeClipboard(text);
+        });
+      }
+    } catch (_e) { /* */ }
+    return writeClipboard(text);
+  }
+
+  /**
+   * Tables are styled by editor.css, which does not travel with the clipboard,
+   * so bake the grid into inline attributes/styles. Existing inline styles are
+   * appended last so marked's per-column `text-align` still wins.
+   */
+  function _inlineTableStyles(root) {
+    root.querySelectorAll('table').forEach((t) => {
+      t.setAttribute('border', '1');
+      t.setAttribute('cellspacing', '0');
+      t.setAttribute('style', 'border-collapse:collapse;' + (t.getAttribute('style') || ''));
+    });
+    root.querySelectorAll('th, td').forEach((c) => {
+      const isHead = c.tagName === 'TH';
+      c.setAttribute('style',
+        'border:1px solid #999999;padding:4px 8px;'
+        + (isHead ? 'font-weight:bold;background-color:#f0f0f0;' : '')
+        + (c.getAttribute('style') || ''));
+    });
+  }
+
+  /**
+   * Stamped into our own text/html payload so a paste coming back from this
+   * editor can take the text/plain flavor (the verbatim markdown) instead of
+   * round-tripping through the HTML→markdown converter. Foreign apps ignore
+   * HTML comments, so it is invisible everywhere else.
+   */
+  const _MDE_CLIPBOARD_MARKER = 'md-visual-editor-block';
+
+  /** Rendered (sanitized) HTML for the given block start indices, in order. */
+  function _renderBlocksHtml(indices) {
+    if (!indices || !indices.length) return '';
+    const host = document.createElement('div');
+    let any = false;
+    for (const i of indices) {
+      const raw = rawOfRange(rangeOf(i)).replace(/\s+$/, '');
+      if (!raw) continue;
+      let html = '';
+      try {
+        // @ts-ignore
+        html = sanitizeHtml(_renderMarkdown(raw));
+      } catch (_e) {
+        html = '';
+      }
+      if (!html.trim()) continue;
+      host.insertAdjacentHTML('beforeend', html);
+      any = true;
+    }
+    if (!any) return '';
+    _inlineTableStyles(host);
+    return '<!--' + _MDE_CLIPBOARD_MARKER + '-->' + host.innerHTML;
+  }
+
+  // ─── Paste: HTML → Markdown (PowerPoint / Excel / Word / browsers) ───
+
+  /** Inline serialization of a node's content. Block-ish children end a line. */
+  function _mdInline(node) {
+    if (!node) return '';
+    if (node.nodeType === 3) {
+      return String(node.nodeValue || '').replace(/\s+/g, ' ');
+    }
+    if (node.nodeType !== 1) return '';
+    const tag = node.tagName.toLowerCase();
+    const inner = () => Array.from(node.childNodes).map(_mdInline).join('');
+    switch (tag) {
+      case 'br': return '\n';
+      case 'strong': case 'b': { const t = inner().trim(); return t ? '**' + t + '**' : ''; }
+      case 'em': case 'i': { const t = inner().trim(); return t ? '*' + t + '*' : ''; }
+      case 'del': case 's': case 'strike': { const t = inner().trim(); return t ? '~~' + t + '~~' : ''; }
+      case 'code': case 'kbd': case 'samp': { const t = inner().trim(); return t ? '`' + t + '`' : ''; }
+      case 'a': {
+        const t = inner().trim();
+        const href = (node.getAttribute('href') || '').trim();
+        return (href && t && !href.startsWith('javascript:')) ? '[' + t + '](' + href + ')' : t;
+      }
+      case 'img': {
+        const src = (node.getAttribute('src') || '').trim();
+        const alt = (node.getAttribute('alt') || '').trim();
+        return src ? '![' + alt + '](' + src + ')' : '';
+      }
+      // Office wraps cell text in paragraphs / divs — keep them on their own line.
+      case 'p': case 'div': case 'li': case 'tr': { const t = inner(); return t ? t + '\n' : ''; }
+      default: return inner();
+    }
+  }
+
+  /** One markdown table cell: newlines become <br>, pipes are escaped. */
+  function _mdCell(cell) {
+    return _mdInline(cell)
+      .replace(/\|/g, '\\|')
+      .replace(/[ \t]*\n[ \t]*/g, '<br>')
+      .replace(/(?:<br>)+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * GFM table from an HTML table. Excel and PowerPoint almost never emit
+   * <thead>, so the first row becomes the header — otherwise the result would
+   * not be a valid markdown table at all.
+   */
+  function _tableToMarkdown(table) {
+    const rows = [];
+    Array.from(table.querySelectorAll('tr')).forEach((tr) => {
+      // Skip rows belonging to a nested table.
+      if (tr.closest('table') !== table) return;
+      const cells = [];
+      Array.from(tr.querySelectorAll('th, td')).forEach((cell) => {
+        if (cell.closest('tr') !== tr) return;
+        cells.push(_mdCell(cell));
+        // colspan/rowspan cannot be expressed in GFM — pad so columns line up.
+        let span = parseInt(cell.getAttribute('colspan') || '1', 10);
+        if (isNaN(span) || span < 1) span = 1;
+        for (let k = 1; k < span; k++) cells.push('');
+      });
+      if (cells.length) rows.push(cells);
+    });
+    if (!rows.length) return '';
+    const width = rows.reduce((m, r) => Math.max(m, r.length), 0);
+    rows.forEach((r) => { while (r.length < width) r.push(''); });
+    const lines = [
+      '| ' + rows[0].join(' | ') + ' |',
+      '| ' + rows[0].map(() => '---').join(' | ') + ' |',
+    ];
+    for (let i = 1; i < rows.length; i++) lines.push('| ' + rows[i].join(' | ') + ' |');
+    return lines.join('\n');
+  }
+
+  function _listToMarkdown(list, depth) {
+    const ordered = list.tagName.toLowerCase() === 'ol';
+    const lines = [];
+    let n = 1;
+    Array.from(list.children).forEach((li) => {
+      if (li.tagName.toLowerCase() !== 'li') return;
+      const clone = li.cloneNode(true);
+      const nested = Array.from(clone.querySelectorAll('ul, ol')).filter(s => s.parentNode === clone);
+      nested.forEach(s => s.remove());
+      const text = _mdInline(clone).replace(/\s+/g, ' ').trim();
+      lines.push('  '.repeat(depth) + (ordered ? (n++) + '. ' : '- ') + text);
+      nested.forEach((s) => {
+        const sub = _listToMarkdown(s, depth + 1);
+        if (sub) lines.push(sub);
+      });
+    });
+    return lines.join('\n');
+  }
+
+  const _MD_BLOCK_SELECTOR = 'table,p,div,ul,ol,h1,h2,h3,h4,h5,h6,blockquote,pre,hr,li,tr';
+
+  function _mdBlock(node) {
+    if (!node) return '';
+    if (node.nodeType === 3) {
+      const t = String(node.nodeValue || '').replace(/\s+/g, ' ');
+      return t.trim() ? t : '';
+    }
+    if (node.nodeType !== 1) return '';
+    const tag = node.tagName.toLowerCase();
+    const kids = () => Array.from(node.childNodes).map(_mdBlock).join('');
+    if (/^h[1-6]$/.test(tag)) {
+      const t = _mdInline(node).replace(/\s+/g, ' ').trim();
+      return t ? '\n\n' + '#'.repeat(Number(tag[1])) + ' ' + t + '\n\n' : '';
+    }
+    switch (tag) {
+      case 'table': { const t = _tableToMarkdown(node); return t ? '\n\n' + t + '\n\n' : ''; }
+      case 'ul': case 'ol': { const t = _listToMarkdown(node, 0); return t ? '\n\n' + t + '\n\n' : ''; }
+      case 'pre': {
+        const t = (node.textContent || '').replace(/\s+$/, '');
+        return t ? '\n\n```\n' + t + '\n```\n\n' : '';
+      }
+      case 'blockquote': {
+        const t = kids().replace(/\n{3,}/g, '\n\n').trim();
+        return t ? '\n\n' + t.split('\n').map(l => ('> ' + l).replace(/\s+$/, '')).join('\n') + '\n\n' : '';
+      }
+      case 'hr': return '\n\n---\n\n';
+      case 'br': return '\n';
+      case 'p': case 'div': case 'section': case 'article': case 'td': case 'th': {
+        // A wrapper (Office nests these deeply) just recurses; a leaf is a paragraph.
+        if (node.querySelector(_MD_BLOCK_SELECTOR)) return kids();
+        const t = _mdInline(node).replace(/[ \t]*\n[ \t]*/g, '\n').replace(/[ \t]+/g, ' ').trim();
+        return t ? '\n\n' + t + '\n\n' : '';
+      }
+      default: return kids();
+    }
+  }
+
+  function _htmlFragmentToMarkdown(html) {
+    const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    if (!doc || !doc.body) return '';
+    doc.body.querySelectorAll('style, script, meta, link, title, xml, o\\:p').forEach(el => el.remove());
+    return _mdBlock(doc.body)
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  /** Convert clipboard HTML to markdown. Returns '' when nothing usable is found. */
+  function _htmlToMarkdown(html) {
+    let s = String(html || '');
+    // Raw CF_HTML payloads start with `Version:1.0 / StartHTML:… ` header lines
+    // that would otherwise be converted into a paragraph.
+    if (/^\s*Version:\s*\d/i.test(s)) {
+      const lt = s.indexOf('<');
+      if (lt > 0) s = s.slice(lt);
+    }
+    // Office marks the actual selection with fragment comments; everything
+    // outside is boilerplate. Fall back to the whole document when the fragment
+    // is unusable on its own (e.g. it starts mid-table, so the rows get
+    // dropped as orphans by the parser).
+    const frag = s.match(/<!--\s*StartFragment\s*-->([\s\S]*?)<!--\s*EndFragment\s*-->/i);
+    if (frag && frag[1].trim()) {
+      const md = _htmlFragmentToMarkdown(frag[1]);
+      if (md) return md;
+    }
+    return _htmlFragmentToMarkdown(s);
+  }
+
+  /**
+   * Excel's plain-text flavor is TSV. Only convert when every line has the same
+   * (non-zero) tab count and none starts with a tab, so indented text/code is
+   * not mangled into a table.
+   */
+  function _tsvToMarkdownTable(text) {
+    const lines = String(text || '').replace(/\r\n?/g, '\n').replace(/\n+$/, '').split('\n');
+    if (lines.length < 2) return '';
+    const tabs = lines[0].split('\t').length - 1;
+    if (tabs < 1) return '';
+    for (const l of lines) {
+      if (l.split('\t').length - 1 !== tabs) return '';
+      if (l.startsWith('\t')) return '';
+    }
+    const rows = lines.map(l => l.split('\t').map(c => c.replace(/\|/g, '\\|').trim()));
+    const out = [
+      '| ' + rows[0].join(' | ') + ' |',
+      '| ' + rows[0].map(() => '---').join(' | ') + ' |',
+    ];
+    for (let i = 1; i < rows.length; i++) out.push('| ' + rows[i].join(' | ') + ' |');
+    return out.join('\n');
+  }
+
+  /** Choose what to insert from the two clipboard flavors. */
+  function _pickPasteMarkdown(plain, html) {
+    // Our own blocks: text/plain already *is* the markdown, so use it verbatim.
+    if (html && html.indexOf(_MDE_CLIPBOARD_MARKER) === -1) {
+      let md = '';
+      try {
+        md = _htmlToMarkdown(html);
+      } catch (err) {
+        console.warn('[Markdown Visual Editor] HTML→Markdown conversion failed:', err);
+        md = '';
+      }
+      if (md) return md;
+    }
+    if (plain) {
+      const table = _tsvToMarkdownTable(plain);
+      if (table) return table;
+    }
+    return plain || null;
+  }
+
+  function _markdownFromDataTransfer(dt) {
+    if (!dt) {
+      console.warn('[Markdown Visual Editor] paste event carried no clipboardData');
+      return null;
+    }
+    let plain = '';
+    let html = '';
+    try { plain = dt.getData('text/plain') || ''; } catch (_e) { /* */ }
+    try { html = dt.getData('text/html') || ''; } catch (_e) { /* */ }
+    console.log('[Markdown Visual Editor] paste flavors:',
+      Array.from(dt.types || []).join(', ') || '(none)',
+      '| text/plain', plain.length, 'chars | text/html', html.length, 'chars');
+    if (!plain && !html) return null;
+    return _pickPasteMarkdown(plain, html);
+  }
+
+  /** Resolve to null instead of hanging when a clipboard permission never settles. */
+  function _withTimeout(promise, ms) {
+    let timer = null;
+    return Promise.race([
+      Promise.resolve(promise).then((v) => { if (timer) clearTimeout(timer); return v; }),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); }),
+    ]);
+  }
+
+  /**
+   * Read the clipboard for the menu-driven paste commands, keeping the
+   * text/html flavor when the browser allows it (readText() only ever sees
+   * plain text, which is why Excel used to arrive as tab-separated lines).
+   */
+  async function readClipboardRich() {
+    if (navigator.clipboard && navigator.clipboard.read) {
+      try {
+        // Webview hosts can leave the permission request unanswered forever,
+        // which would silently swallow the paste — always give up and fall
+        // through to the plain-text read.
+        const items = await _withTimeout(navigator.clipboard.read(), 1500);
+        for (const item of (items || [])) {
+          const types = Array.from(item.types || []);
+          let html = '';
+          let plain = '';
+          if (types.indexOf('text/html') !== -1) html = await (await item.getType('text/html')).text();
+          if (types.indexOf('text/plain') !== -1) plain = await (await item.getType('text/plain')).text();
+          console.log('[Markdown Visual Editor] clipboard.read flavors:', types.join(', '));
+          if (!html && !plain) continue;
+          return _pickPasteMarkdown(plain, html);
+        }
+      } catch (err) {
+        console.warn('[Markdown Visual Editor] clipboard.read failed:', err);
+      }
+    }
+    const plain = await _withTimeout(readClipboard(), 1500);
+    if (plain == null) {
+      console.warn('[Markdown Visual Editor] clipboard could not be read at all');
+      return null;
+    }
+    return _pickPasteMarkdown(plain, '');
+  }
   async function readClipboard() {
     if (navigator.clipboard && navigator.clipboard.readText) {
       try { return await navigator.clipboard.readText(); }
@@ -2801,14 +3182,17 @@
   function copyBlockToClipboard(tokenIndex) {
     const raw = rawOfRange(rangeOf(tokenIndex));
     if (!raw) return Promise.resolve();
-    return writeClipboard(raw);
+    return writeClipboardRich(raw, _renderBlocksHtml([tokenIndex]));
   }
   function cutBlockToClipboard(tokenIndex) {
     copyBlockToClipboard(tokenIndex).finally(() => deleteBlock(tokenIndex));
   }
   function _insertMarkdownTokens(text, insertAt) {
     if (!text) return;
-    const pasted = text.endsWith('\n') ? text : text + '\n';
+    // Always end on a blank line: the raws are concatenated verbatim when the
+    // document is rebuilt, so without it the pasted tail would merge into the
+    // block that follows.
+    const pasted = text.replace(/\s*$/, '') + '\n\n';
     let newTokens;
     try {
       // @ts-ignore
@@ -2819,18 +3203,26 @@
     if (!newTokens || !newTokens.length) return;
     if (insertAt < 0) insertAt = 0;
     if (insertAt > allTokens.length) insertAt = allTokens.length;
+    // …and start on one. The block we land after may end without a blank line
+    // (the document's last block usually does), which would otherwise glue the
+    // pasted text onto its final paragraph.
+    const prevRaw = insertAt > 0 ? (allTokens[insertAt - 1].raw || '') : '';
+    if (prevRaw) {
+      const trailing = (prevRaw.match(/\n*$/) || [''])[0].length;
+      if (trailing < 2) newTokens.unshift({ type: 'space', raw: '\n'.repeat(2 - trailing) });
+    }
     allTokens.splice(insertAt, 0, ...newTokens);
     const fullText = getFullMarkdown();
     sendEdit(fullText);
     handleDocumentUpdate(fullText);
   }
   async function pasteAfterBlock(tokenIndex) {
-    const text = await readClipboard();
+    const text = await readClipboardRich();
     if (text == null) return;
     _insertMarkdownTokens(text, rangeOf(tokenIndex).end);
   }
   async function pasteAtEnd() {
-    const text = await readClipboard();
+    const text = await readClipboardRich();
     if (text == null) return;
     _insertMarkdownTokens(text, allTokens.length);
   }
@@ -3044,7 +3436,7 @@
   function copySelectedBlocksToClipboard() {
     const text = _serializeSelectedBlocks();
     if (!text) return Promise.resolve();
-    return writeClipboard(text);
+    return writeClipboardRich(text, _renderBlocksHtml(getSortedSelection()));
   }
 
   function _deleteBlocksByIndices(sortedIndices) {
@@ -3093,6 +3485,131 @@
   }
   setTimeout(installSelectionClearOnBackgroundClick, 0);
 
+  /**
+   * Where a block-level paste lands: *after* the whole selected block. Using
+   * `start + 1` would drop the content between a section's heading and its
+   * body — i.e. inside the block instead of after it.
+   */
+  function _blockPasteInsertIndex() {
+    const sorted = getSortedSelection();
+    if (!sorted.length) return allTokens.length;
+    return rangeOf(sorted[sorted.length - 1]).end;
+  }
+
+  /**
+   * Non-null while a Ctrl+V is in flight. Two paths race to satisfy it (the
+   * native paste event and a clipboard read); the token makes sure exactly one
+   * of them inserts.
+   */
+  let _pasteToken = null;
+  /** Hidden editable that receives the paste so the event is dispatched at all. */
+  let _pasteCaptureEl = null;
+  let _pasteRestoreFocus = null;
+
+  /** True when the event target is one of the editors that handles its own paste. */
+  function _isEditableTarget(t) {
+    if (!t) return false;
+    if (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT') return true;
+    if (t.isContentEditable) return true;
+    return !!(t.closest && t.closest('.editing, .mermaid-editor, .dve-ctxmenu, .table-ctx-menu'));
+  }
+
+  function _pasteCaptureElement() {
+    if (_pasteCaptureEl && _pasteCaptureEl.isConnected) return _pasteCaptureEl;
+    const el = document.createElement('div');
+    el.className = 'paste-capture';
+    el.setAttribute('contenteditable', 'true');
+    el.setAttribute('aria-hidden', 'true');
+    el.setAttribute('tabindex', '-1');
+    el.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;'
+      + 'opacity:0;overflow:hidden;white-space:pre;';
+    document.body.appendChild(el);
+    _pasteCaptureEl = el;
+    return el;
+  }
+
+  /**
+   * Chromium only runs the paste command — and so only fires a `paste` event
+   * carrying clipboardData — when the paste target is editable. A block
+   * selection is not, which is why reading text/html used to be impossible
+   * here. Focus a hidden contenteditable for the duration of the keystroke:
+   * the event then arrives with every clipboard flavor, including the
+   * text/html that PowerPoint and Excel put there.
+   */
+  function _armPasteCapture() {
+    try {
+      const el = _pasteCaptureElement();
+      _pasteRestoreFocus = document.activeElement;
+      el.textContent = '';
+      el.focus({ preventScroll: true });
+      const sel = window.getSelection && window.getSelection();
+      if (sel) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      return true;
+    } catch (err) {
+      console.warn('[Markdown Visual Editor] paste capture could not be armed:', err);
+      return false;
+    }
+  }
+
+  function _disarmPasteCapture() {
+    if (_pasteCaptureEl) _pasteCaptureEl.textContent = '';
+    const back = _pasteRestoreFocus;
+    _pasteRestoreFocus = null;
+    if (back && typeof back.focus === 'function' && back.isConnected) {
+      try { back.focus({ preventScroll: true }); } catch (_e) { /* */ }
+    }
+  }
+
+  /** Insert, unless the competing path already served this Ctrl+V. */
+  function _commitPaste(text) {
+    if (!_pasteToken) return false;
+    if (text == null || text === '') return false;
+    _pasteToken = null;
+    _insertMarkdownTokens(text, _blockPasteInsertIndex());
+    return true;
+  }
+
+  /** Reading the clipboard directly, for hosts that never dispatch `paste`. */
+  function _schedulePasteFallback(token) {
+    setTimeout(async () => {
+      if (_pasteToken !== token) return;
+      _disarmPasteCapture();
+      let text = null;
+      try {
+        text = await readClipboardRich();
+      } catch (err) {
+        console.warn('[Markdown Visual Editor] clipboard read failed:', err);
+      }
+      if (_pasteToken !== token) return;
+      _commitPaste(text);
+      if (_pasteToken === token) _pasteToken = null;
+    }, 0);
+  }
+
+  // Block-level paste. Reading the event's dataTransfer is what lets a
+  // PowerPoint / Excel table come in as a markdown table rather than as the
+  // tab-separated plain-text flavor.
+  document.addEventListener('paste', (e) => {
+    const viaCapture = !!(_pasteCaptureEl && e.target === _pasteCaptureEl);
+    if (!viaCapture && _isEditableTarget(e.target)) return;
+    if (_selectedBlockIndices.size === 0) return;
+    e.preventDefault();
+    let text = null;
+    try {
+      text = _markdownFromDataTransfer(e.clipboardData);
+    } catch (err) {
+      console.warn('[Markdown Visual Editor] paste conversion failed:', err);
+    }
+    if (viaCapture) _disarmPasteCapture();
+    // On empty the token is left alone so the clipboard-read fallback still runs.
+    _commitPaste(text);
+  }, true);
+
   // Document-level keyboard shortcuts for block clipboard operations.
   document.addEventListener('keydown', async (e) => {
     if (_selectedBlockIndices.size === 0) return;
@@ -3102,20 +3619,25 @@
     if (t && t.closest && t.closest('.editing, .mermaid-editor, .dve-ctxmenu, .table-ctx-menu')) return;
     const mod = e.ctrlKey || e.metaKey;
     if (mod && (e.key === 'c' || e.key === 'C')) {
+      // A real text selection already copies natively with both text/plain and
+      // text/html, which is exactly what rich-text targets want — leave it be
+      // and only fall back to block-level copy when nothing is selected.
+      const nativeSel = window.getSelection && window.getSelection();
+      if (nativeSel && String(nativeSel).trim().length > 0) return;
       e.preventDefault();
       await copySelectedBlocksToClipboard();
     } else if (mod && (e.key === 'x' || e.key === 'X')) {
       e.preventDefault();
       cutSelectedBlocksToClipboard();
     } else if (mod && (e.key === 'v' || e.key === 'V')) {
-      e.preventDefault();
-      const text = await readClipboard();
-      if (text == null) return;
-      const sorted = getSortedSelection();
-      const last = sorted[sorted.length - 1];
-      let insertAt = last + 1;
-      if (insertAt < allTokens.length && allTokens[insertAt].type === 'space') insertAt++;
-      _insertMarkdownTokens(text, insertAt);
+      // Don't preventDefault: the browser's own paste event is the only place
+      // the text/html flavor (PowerPoint / Excel tables) can be read, and it is
+      // only dispatched into an editable target — hence the hidden capture
+      // element. The fallback covers hosts that never dispatch it at all.
+      const token = {};
+      _pasteToken = token;
+      _armPasteCapture();
+      _schedulePasteFallback(token);
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       if (_selectedBlockIndices.size >= 2) {
         e.preventDefault();
