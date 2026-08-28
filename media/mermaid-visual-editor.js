@@ -31,6 +31,60 @@
     RL: '← 右から左',
   };
 
+  // ─── リンク（接続線）記法 ───
+  // Mermaid 本体のレキサ（flowchart）と同じ規則で接続記号を認識する。
+  //   通常   : [xo<]?--+[-xo>]       例) --- / --> / --o / --x / <--> / o--o / ---->
+  //   太線   : [xo<]?==+[=xo>]       例) === / ==> / ==o / <==>
+  //   点線   : [xo<]?-?\.+-[xo>]?    例) -.- / -.-> / -..-> / <-.->
+  //   非表示 : ~~~
+  // ラベル埋め込み記法（A -- テキスト --> B）は「開始記号 → テキスト → 終了記号」で構成される。
+  // prefix は「終了記号」から完全な記号を復元するための補い（-. ラベル .-> → -.->）
+  const LINK_FORMS = [
+    { link: /^[xo<]?--+[-xo>]/,    start: /^[xo<]?--/,  end: /^--+[-xo>]/,  prefix: '' },
+    { link: /^[xo<]?==+[=xo>]/,    start: /^[xo<]?==/,  end: /^==+[=xo>]/,  prefix: '' },
+    { link: /^[xo<]?-?\.+-[xo>]?/, start: /^[xo<]?-\./, end: /^\.+-[xo>]?/, prefix: '-' },
+    { link: /^~~~+/,               start: null,         end: null,          prefix: '' },
+  ];
+
+  // 接続記号 → EDGE_TYPES のキー。一致しない記号は type='custom' として原文を保持する。
+  const SYNTAX_TO_TYPE = {};
+  for (const [_k, _et] of Object.entries(EDGE_TYPES)) SYNTAX_TO_TYPE[_et.syntax] = _k;
+
+  // ノード ID に使える文字。Mermaid は数字始まり・ハイフン・ドット・日本語なども許可する。
+  const ID_BODY_RE = /[A-Za-z0-9_.\-\u00C0-\uFFFF]/;
+  const NODE_ID = /[A-Za-z0-9_\u00C0-\uFFFF][A-Za-z0-9_.\-\u00C0-\uFFFF]*/.source;
+
+  /** 「ID + 開き括弧 + ラベル + 閉じ括弧」形の正規表現を組み立てる */
+  function nodeRefRe(open, close) {
+    return new RegExp('^(' + NODE_ID + ')' + open.source + '(.*)' + close.source + '$');
+  }
+
+  // ノード参照の記法一覧（並び順が優先順位。長い括弧から先に判定する）
+  const NODE_REF_PATTERNS = [
+    { re: nodeRefRe(/\[\[/, /\]\]/), shape: 'subroutine' },
+    { re: nodeRefRe(/\(\(/, /\)\)/), shape: 'circle' },
+    { re: nodeRefRe(/\(\[/, /\]\)/), shape: 'stadium' },
+    { re: nodeRefRe(/\{\{/, /\}\}/), shape: 'hexagon' },
+    { re: nodeRefRe(/\[\(/, /\)\]/), shape: 'cylinder' },
+    { re: nodeRefRe(/\[/, /\]/),     shape: 'rect' },
+    { re: nodeRefRe(/\(/, /\)/),     shape: 'rounded' },
+    { re: nodeRefRe(/\{/, /\}/),     shape: 'diamond' },
+    { re: nodeRefRe(/>/, /\]/),      shape: 'raw' }, // 非対称形 A>text]
+    { re: new RegExp('^(' + NODE_ID + ')' + /@\{[\s\S]*\}$/.source), shape: 'raw' }, // Mermaid 11 の A@{ shape: ... }
+  ];
+  const PLAIN_ID_RE = new RegExp('^(' + NODE_ID + ')$');
+
+  // ノード定義ではない文（解釈せず原文のまま保持する）
+  const DIRECTIVE_RE = /^(classDef|class|click|linkStyle|style|accTitle|accDescr|href)\b|^direction\s+(TB|BT|RL|LR|TD)\b/;
+
+  /** 接続線の種類の表示名（未対応記法は記号をそのまま見せる） */
+  function edgeTypeLabel(edge) {
+    const et = edge && EDGE_TYPES[edge.type];
+    if (et) return et.label;
+    if (edge && edge.raw) return edge.raw;
+    return EDGE_TYPES.arrow.label;
+  }
+
   // ─── Color Presets ───
   const NODE_COLORS = [
     { label: 'デフォルト', fill: '', stroke: '' },
@@ -56,6 +110,9 @@
 
   const MODE = { NORMAL: 'normal', CONNECTING: 'connecting', GROUPING: 'grouping' };
 
+  // 接続編集ダイアログで「元の記法を維持する」を表す値
+  const KEEP_EDGE_SYNTAX = '__keep__';
+
   // ─── FlowchartModel ───
   class FlowchartModel {
     constructor() {
@@ -63,8 +120,12 @@
       this.layout = 'dagre';
       this.nodes = new Map();
       this.edges = [];
-      this.subgraphs = []; // { id, label, nodeIds: [], parentSgId: string|null }
-      this.styles = new Map(); // nodeId → { fill, stroke, color }
+      this.subgraphs = []; // { id, label, nodeIds: [], parentSgId: string|null, extras: [] }
+      this.styles = new Map(); // nodeId → { fill, stroke, color, extra }
+      this.extras = [];        // 解釈対象外の行（classDef / class / click / linkStyle / コメント等）
+      this._initRaw = '';      // 元の %%{init: ...}%% 行
+      this._initObj = null;
+      this._initLayout = 'dagre';
       this._idCounter = 0;
       this._sgCounter = 0;
     }
@@ -75,30 +136,41 @@
       this.edges = [];
       this.subgraphs = [];
       this.styles = new Map();
+      this.extras = [];
       this.layout = 'dagre';
+      this._initRaw = '';
+      this._initObj = null;
+      this._initLayout = 'dagre';
       this._idCounter = 0;
       this._sgCounter = 0;
 
-      const lines = code.split('\n');
+      // 1 行に ; で複数の文が並ぶ書き方（graph TD; A-->B;）にも対応する
+      const statements = [];
+      for (const line of code.split('\n')) {
+        for (const s of this._splitStatements(line)) statements.push(s);
+      }
       const sgStack = []; // nesting stack
 
-      for (const line of lines) {
-        const t = line.trim();
+      for (const t of statements) {
         if (!t) continue;
 
         // Init directive: %%{init: {...}}%%
         const initMatch = t.match(/^%%\{\s*init\s*:\s*(\{[\s\S]*\})\s*\}%%$/);
         if (initMatch) {
+          this._initRaw = t;
           try {
             const obj = JSON.parse(initMatch[1].replace(/'/g, '"'));
             if (obj && typeof obj === 'object') {
+              this._initObj = obj;
               if (obj.layout) this.layout = String(obj.layout);
               else if (obj.flowchart && obj.flowchart.defaultRenderer === 'elk') this.layout = 'elk';
             }
           } catch (_e) { /* ignore */ }
+          this._initLayout = this.layout;
           continue;
         }
-        if (t.startsWith('%%')) continue;
+        // コメント行は解釈しないが捨てもしない
+        if (t.startsWith('%%')) { this._pushExtra(sgStack, t); continue; }
 
         // Direction
         const dirMatch = t.match(/^(?:graph|flowchart)\s+(TD|TB|LR|RL|BT)/i);
@@ -114,14 +186,21 @@
           const nodeId = styleMatch[1];
           const propsStr = styleMatch[2];
           const props = {};
+          const extra = [];
           for (const pair of propsStr.split(',')) {
-            const [k, v] = pair.split(':').map(s => s.trim());
-            if (k && v) props[k] = v;
+            const idx = pair.indexOf(':');
+            if (idx < 0) continue;
+            const k = pair.substring(0, idx).trim();
+            const v = pair.substring(idx + 1).trim();
+            if (!k || !v) continue;
+            if (k === 'fill' || k === 'stroke' || k === 'color') props[k] = v;
+            else extra.push(k + ':' + v); // stroke-width などは編集対象外だが保持する
           }
           this.styles.set(nodeId, {
             fill: props.fill || '',
             stroke: props.stroke || '',
             color: props.color || '',
+            extra: extra.join(','),
           });
           continue;
         }
@@ -133,42 +212,58 @@
           const sgId = sgMatch ? sgMatch[1] : ('SG' + this._sgCounter++);
           const sgLabel = sgMatch ? sgMatch[2] : (sgMatchSimple ? sgMatchSimple[1].trim() : sgId);
           const parent = sgStack.length > 0 ? sgStack[sgStack.length - 1].id : null;
-          const sg = { id: sgId, label: sgLabel, nodeIds: [], parentSgId: parent };
+          const sg = { id: sgId, label: sgLabel, nodeIds: [], parentSgId: parent, extras: [] };
           this.subgraphs.push(sg);
           sgStack.push(sg);
           continue;
         }
 
         // Subgraph end
-        if (t === 'end') {
+        if (/^end\s*;?$/.test(t)) {
           sgStack.pop();
           continue;
         }
 
         const currentSubgraph = sgStack.length > 0 ? sgStack[sgStack.length - 1] : null;
 
+        // ノード定義ではない文（classDef / class / click / linkStyle / direction 等）は原文のまま保持
+        if (DIRECTIVE_RE.test(t)) { this._pushExtra(sgStack, t); continue; }
+
         // Edge
-        const edge = this._parseEdgeLine(t);
-        if (edge) {
-          this._ensureNode(edge.fromId, edge.fromLabel, edge.fromShape);
-          this._ensureNode(edge.toId, edge.toLabel, edge.toShape);
-          this.edges.push({ from: edge.fromId, to: edge.toId, label: edge.edgeLabel, type: edge.edgeType });
-          if (currentSubgraph) {
-            if (!currentSubgraph.nodeIds.includes(edge.fromId)) currentSubgraph.nodeIds.push(edge.fromId);
-            if (!currentSubgraph.nodeIds.includes(edge.toId)) currentSubgraph.nodeIds.push(edge.toId);
+        // A --> B / A -- ラベル --> B / A --> B --> C（連鎖）/ A & B --> C（複数指定）に対応
+        const stmt = this._parseEdgeStatement(t);
+        if (stmt) {
+          for (const ref of stmt.nodeRefs) {
+            this._ensureNodeRef(ref);
+            if (currentSubgraph && !currentSubgraph.nodeIds.includes(ref.id)) {
+              currentSubgraph.nodeIds.push(ref.id);
+            }
           }
+          for (const e of stmt.edges) this.edges.push(e);
           continue;
         }
 
         // Standalone node
-        const node = this._parseNodeRef(t);
-        if (node && node.label) {
-          this._ensureNode(node.id, node.label, node.shape);
-          if (currentSubgraph) {
-            if (!currentSubgraph.nodeIds.includes(node.id)) currentSubgraph.nodeIds.push(node.id);
+        const refs = this._parseOperandGroup(t);
+        if (refs) {
+          for (const ref of refs) {
+            this._ensureNodeRef(ref);
+            if (currentSubgraph && !currentSubgraph.nodeIds.includes(ref.id)) {
+              currentSubgraph.nodeIds.push(ref.id);
+            }
           }
           continue;
         }
+
+        // どの構文にも当てはまらない行も捨てずに保持する（保存時に消えないように）
+        this._pushExtra(sgStack, t);
+      }
+
+      // サブグラフ ID を端点にした接続（SG1 --> SG2）でノードを作らない
+      for (const sg of this.subgraphs) {
+        if (!this.nodes.has(sg.id)) continue;
+        this.nodes.delete(sg.id);
+        for (const s of this.subgraphs) s.nodeIds = s.nodeIds.filter(nid => nid !== sg.id);
       }
 
       // Sync _idCounter
@@ -178,14 +273,41 @@
       }
     }
 
+    /** 1 行を ; 区切りの文へ分解する（括弧・引用符の中の ; は区切りにしない） */
+    _splitStatements(line) {
+      const t = line.trim();
+      if (!t) return [];
+      if (t.startsWith('%%')) return [t]; // コメント／ディレクティブは分割しない
+      const out = [];
+      let cur = '';
+      let i = 0;
+      while (i < t.length) {
+        if (t[i] === ';') { out.push(cur.trim()); cur = ''; i++; continue; }
+        const next = this._skipOperandChar(t, i);
+        cur += t.substring(i, next);
+        i = next;
+      }
+      out.push(cur.trim());
+      return out.filter(s => s.length > 0);
+    }
+
+    /** 解釈できなかった行を、その時点のサブグラフ（無ければトップレベル）に退避する */
+    _pushExtra(sgStack, line) {
+      const sg = sgStack.length > 0 ? sgStack[sgStack.length - 1] : null;
+      if (sg) {
+        if (!sg.extras) sg.extras = [];
+        sg.extras.push(line);
+      } else {
+        this.extras.push(line);
+      }
+    }
+
     /** モデルからMermaidコードを生成 */
     generate() {
       const lines = [];
-      // Layout directive
-      const layout = this.layout || 'dagre';
-      if (layout && layout !== 'dagre') {
-        lines.push('%%{init: {"layout": "' + layout + '"}}%%');
-      }
+      // Layout directive（元の init 記述にテーマ等が含まれていればそれも保つ）
+      const initLine = this._buildInitLine();
+      if (initLine) lines.push(initLine);
       lines.push('graph ' + this.direction);
 
       // Determine which nodes are inside any subgraph
@@ -197,8 +319,7 @@
       // Ungrouped node definitions
       for (const [id, node] of this.nodes) {
         if (groupedNodeIds.has(id)) continue;
-        const s = SHAPES[node.shape] || SHAPES.rect;
-        lines.push('    ' + id + s.open + node.label + s.close);
+        lines.push('    ' + this._nodeSyntax(node));
       }
 
       // Build subgraph tree (root subgraphs first, then nested)
@@ -217,13 +338,13 @@
         const indent = '    '.repeat(depth + 1);
         const innerIndent = '    '.repeat(depth + 2);
         lines.push(indent + 'subgraph ' + sg.id + '[' + sg.label + ']');
+        for (const ex of (sg.extras || [])) lines.push(innerIndent + ex);
         const childIds = new Set((childrenOf.get(sg.id) || []).flatMap(c => c.nodeIds));
         for (const nid of sg.nodeIds) {
           if (childIds.has(nid)) continue; // node will be emitted by descendant subgraph
           const node = this.nodes.get(nid);
           if (!node) continue;
-          const s = SHAPES[node.shape] || SHAPES.rect;
-          lines.push(innerIndent + nid + s.open + node.label + s.close);
+          lines.push(innerIndent + this._nodeSyntax(node));
         }
         for (const child of (childrenOf.get(sg.id) || [])) emitSg(child, depth + 1);
         lines.push(indent + 'end');
@@ -232,7 +353,8 @@
 
       // Edges
       for (const edge of this.edges) {
-        const syn = (EDGE_TYPES[edge.type] || EDGE_TYPES.arrow).syntax;
+        // GUI で扱えない記法（--o / <--> / ---- など）は原文の記号をそのまま使う
+        const syn = edge.raw || (EDGE_TYPES[edge.type] || EDGE_TYPES.arrow).syntax;
         let line = '    ' + edge.from + ' ' + syn;
         if (edge.label) line += '|' + edge.label + '|';
         line += ' ' + edge.to;
@@ -241,17 +363,53 @@
 
       // Style definitions
       for (const [nodeId, style] of this.styles) {
-        if (!this.nodes.has(nodeId)) continue;
+        if (!this.nodes.has(nodeId) && !this.subgraphs.some(sg => sg.id === nodeId)) continue;
         const parts = [];
         if (style.fill) parts.push('fill:' + style.fill);
         if (style.stroke) parts.push('stroke:' + style.stroke);
         if (style.color) parts.push('color:' + style.color);
+        if (style.extra) parts.push(style.extra);
         if (parts.length > 0) {
           lines.push('    style ' + nodeId + ' ' + parts.join(','));
         }
       }
 
+      // 解釈対象外だった行（classDef / class / click / linkStyle / コメント等）
+      for (const ex of this.extras) lines.push('    ' + ex);
+
       return lines.join('\n');
+    }
+
+    /** ノード 1 個分の Mermaid 記述 */
+    _nodeSyntax(node) {
+      if (node.raw) return node.raw;
+      const s = SHAPES[node.shape] || SHAPES.rect;
+      return node.id + s.open + node.label + s.close + (node.classes ? ':::' + node.classes : '');
+    }
+
+    /** %%{init: ...}%% 行を組み立てる（レイアウト未変更なら元の記述をそのまま返す） */
+    _buildInitLine() {
+      const layout = this.layout || 'dagre';
+      if (this._initRaw && layout === this._initLayout) return this._initRaw;
+
+      let obj = null;
+      if (this._initObj) {
+        try { obj = JSON.parse(JSON.stringify(this._initObj)); } catch (_e) { obj = null; }
+      }
+      if (!obj) {
+        // 元の init が解析できない場合は原文を残したうえでレイアウトだけ足す
+        const layoutLine = layout !== 'dagre' ? '%%{init: {"layout": "' + layout + '"}}%%' : '';
+        if (!this._initRaw) return layoutLine;
+        return layoutLine ? this._initRaw + '\n' + layoutLine : this._initRaw;
+      }
+      if (layout !== 'dagre') obj.layout = layout;
+      else delete obj.layout;
+      if (obj.flowchart && obj.flowchart.defaultRenderer === 'elk' && layout !== 'elk') {
+        delete obj.flowchart.defaultRenderer;
+        if (Object.keys(obj.flowchart).length === 0) delete obj.flowchart;
+      }
+      if (Object.keys(obj).length === 0) return '';
+      return '%%{init: ' + JSON.stringify(obj) + '}%%';
     }
 
     generateNextId() {
@@ -278,12 +436,16 @@
 
     updateNodeLabel(id, label) {
       const n = this.nodes.get(id);
-      if (n) n.label = label;
+      if (!n) return;
+      n.label = label;
+      delete n.raw; // 独自記法は編集内容を反映できないため通常記法へ戻す
     }
 
     updateNodeShape(id, shape) {
       const n = this.nodes.get(id);
-      if (n) n.shape = shape;
+      if (!n) return;
+      n.shape = shape;
+      delete n.raw;
     }
 
     addEdge(from, to, type, label) {
@@ -299,19 +461,24 @@
     }
 
     updateEdgeType(index, type) {
-      if (this.edges[index]) this.edges[index].type = type;
+      const e = this.edges[index];
+      if (!e) return;
+      e.type = type;
+      delete e.raw; // 線種を選び直したら元の記法は破棄する
     }
 
     // ─── Style methods ───
     getNodeStyle(id) {
-      return this.styles.get(id) || { fill: '', stroke: '', color: '' };
+      return this.styles.get(id) || { fill: '', stroke: '', color: '', extra: '' };
     }
 
     setNodeStyle(id, fill, stroke, color) {
-      if (!fill && !stroke && !color) {
+      const cur = this.styles.get(id);
+      const extra = cur ? (cur.extra || '') : '';
+      if (!fill && !stroke && !color && !extra) {
         this.styles.delete(id);
       } else {
-        this.styles.set(id, { fill: fill || '', stroke: stroke || '', color: color || '' });
+        this.styles.set(id, { fill: fill || '', stroke: stroke || '', color: color || '', extra });
       }
     }
 
@@ -392,74 +559,214 @@
     }
 
     // ─── Internal parsers ───
-    _ensureNode(id, label, shape) {
-      if (!this.nodes.has(id)) {
-        this.nodes.set(id, { id, label: label || id, shape: shape || 'rect' });
+    _ensureNode(id, label, shape, raw, classes) {
+      let n = this.nodes.get(id);
+      if (!n) {
+        n = { id, label: label || id, shape: shape || 'rect' };
+        this.nodes.set(id, n);
       } else if (label) {
-        const n = this.nodes.get(id);
         n.label = label;
         if (shape) n.shape = shape;
+        delete n.raw;
       }
+      if (raw) n.raw = raw;
+      if (classes) n.classes = classes;
     }
 
-    _parseEdgeLine(line) {
-      // Find the edge operator first
-      const ops = [
-        { re: /\s*-\.->/, type: 'dotted' },
-        { re: /\s*==>/, type: 'thick' },
-        { re: /\s*-->/, type: 'arrow' },
-        { re: /\s*---/, type: 'line' },
-      ];
+    _ensureNodeRef(ref) {
+      this._ensureNode(ref.id, ref.label, ref.shape, ref.raw, ref.classes);
+    }
 
-      for (const op of ops) {
-        const m = line.match(op.re);
-        if (!m) continue;
+    /**
+     * 接続文を解釈する。
+     *   A --> B / A -- ラベル --> B / A -->|ラベル| B
+     *   A --> B --> C（連鎖）/ A & B --> C & D（複数指定）
+     *   --- / --o / --x / <--> / ==> / -.-> / ~~~ / ----> などの記法すべて
+     * @returns {{nodeRefs: Array, edges: Array}|null} 接続文でなければ null
+     */
+    _parseEdgeStatement(line) {
+      const src = line.replace(/\s*;\s*$/, '').trim();
+      if (!src) return null;
 
-        const idx = line.indexOf(m[0]);
-        const left = line.substring(0, idx).trim();
-        let right = line.substring(idx + m[0].length).trim();
-
-        // Edge label: -->|text| or similar
-        let edgeLabel = '';
-        const lm = right.match(/^\|([^|]*)\|\s*/);
-        if (lm) { edgeLabel = lm[1]; right = right.substring(lm[0].length).trim(); }
-
-        // Also handle -- text --> style (label embedded between --)
-        if (!edgeLabel) {
-          const lm2 = m[0].match(/--\s*(.+?)\s*-->/);
-          if (lm2) edgeLabel = lm2[1];
+      const groups = []; // 接続記号で区切られたノード群の文字列
+      const links = [];  // 接続記号
+      let pos = 0;
+      let start = 0;
+      while (pos < src.length) {
+        const link = this._matchLinkAt(src, pos);
+        if (link) {
+          groups.push(src.substring(start, pos));
+          links.push(link);
+          pos = link.end;
+          start = pos;
+          continue;
         }
+        pos = this._skipOperandChar(src, pos);
+      }
+      if (links.length === 0) return null;
+      groups.push(src.substring(start));
 
-        const fromNode = this._parseNodeRef(left);
-        const toNode = this._parseNodeRef(right);
-        if (fromNode && toNode) {
-          return {
-            fromId: fromNode.id, fromLabel: fromNode.label, fromShape: fromNode.shape,
-            toId: toNode.id, toLabel: toNode.label, toShape: toNode.shape,
-            edgeLabel, edgeType: op.type,
-          };
+      const refGroups = groups.map(g => this._parseOperandGroup(g));
+      if (refGroups.some(g => !g || g.length === 0)) return null;
+
+      const nodeRefs = [];
+      for (const g of refGroups) for (const r of g) nodeRefs.push(r);
+
+      const edges = [];
+      for (let i = 0; i < links.length; i++) {
+        for (const from of refGroups[i]) {
+          for (const to of refGroups[i + 1]) {
+            edges.push({
+              from: from.id, to: to.id,
+              label: links[i].label, type: links[i].type, raw: links[i].raw,
+            });
+          }
+        }
+      }
+      return { nodeRefs, edges };
+    }
+
+    /**
+     * src[pos] から始まる接続記号を読む。
+     * @returns {{end: number, label: string, type: string, raw: string}|null}
+     */
+    _matchLinkAt(src, pos) {
+      const rest = src.substring(pos);
+      const prev = pos > 0 ? src[pos - 1] : '';
+
+      // ラベル無しの記号（--> / --o / <--> / -.-> / ==> / ~~~ など）。最長一致を採る
+      let best = null;
+      for (const form of LINK_FORMS) {
+        const m = rest.match(form.link);
+        if (!m || !m[0]) continue;
+        // 直前が ID 構成文字なら、先頭の x / o は ID の一部（例: foo-->B の "o"）
+        if ((m[0][0] === 'x' || m[0][0] === 'o') && ID_BODY_RE.test(prev)) continue;
+        if (!best || m[0].length > best.length) best = m[0];
+      }
+      if (best) {
+        const lbl = this._readPipeLabel(src, pos + best.length);
+        return Object.assign({ end: lbl.end, label: lbl.label }, this._classifyLink(best));
+      }
+
+      // ラベル埋め込み記法（-- ラベル --> / -. ラベル .-> / == ラベル ==>）
+      for (const form of LINK_FORMS) {
+        if (!form.start) continue;
+        const m = rest.match(form.start);
+        if (!m) continue;
+        if ((m[0][0] === 'x' || m[0][0] === 'o') && ID_BODY_RE.test(prev)) continue;
+        const head = /^[xo<]/.test(m[0]) ? m[0][0] : '';
+        const textStart = pos + m[0].length;
+        for (let i = textStart; i < src.length; i++) {
+          const em = src.substring(i).match(form.end);
+          if (!em) continue;
+          const text = src.substring(textStart, i).trim();
+          const lbl = this._readPipeLabel(src, i + em[0].length);
+          return Object.assign(
+            { end: lbl.end, label: lbl.label || text },
+            this._classifyLink(head + form.prefix + em[0])
+          );
         }
       }
       return null;
     }
 
-    _parseNodeRef(str) {
-      const patterns = [
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\[\[(.*?)\]\]$/, shape: 'subroutine' },
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\(\((.*?)\)\)$/, shape: 'circle' },
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\(\[(.*?)\]\)$/, shape: 'stadium' },
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\{\{(.*?)\}\}$/, shape: 'hexagon' },
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\[\((.*?)\)\]$/, shape: 'cylinder' },
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\[(.*?)\]$/, shape: 'rect' },
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\((.*?)\)$/, shape: 'rounded' },
-        { re: /^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)\{(.*?)\}$/, shape: 'diamond' },
-      ];
-      for (const p of patterns) {
-        const m = str.match(p.re);
-        if (m) return { id: m[1], label: m[2], shape: p.shape };
+    /** 接続記号の直後の |ラベル| を読む */
+    _readPipeLabel(src, i) {
+      let j = i;
+      while (j < src.length && /\s/.test(src[j])) j++;
+      if (src[j] !== '|') return { end: i, label: '' };
+      const close = src.indexOf('|', j + 1);
+      if (close < 0) return { end: i, label: '' };
+      return { end: close + 1, label: src.substring(j + 1, close).trim() };
+    }
+
+    /** 接続記号を EDGE_TYPES へ対応づける（対応が無ければ原文を raw で保持） */
+    _classifyLink(syntax) {
+      const type = SYNTAX_TO_TYPE[syntax];
+      if (type) return { type, raw: '' };
+      return { type: 'custom', raw: syntax };
+    }
+
+    /** & で並べられたノード参照をまとめて解釈する */
+    _parseOperandGroup(str) {
+      const parts = [];
+      let cur = '';
+      let i = 0;
+      while (i < str.length) {
+        if (str[i] === '&') { parts.push(cur); cur = ''; i++; continue; }
+        const next = this._skipOperandChar(str, i);
+        cur += str.substring(i, next);
+        i = next;
       }
-      const plain = str.match(/^([a-zA-Z_\u3000-\u9FFF][a-zA-Z0-9_\u3000-\u9FFF]*)$/);
-      if (plain) return { id: plain[1], label: '', shape: 'rect' };
+      parts.push(cur);
+
+      const refs = [];
+      for (const p of parts) {
+        const ref = this._parseNodeRef(p.trim());
+        if (!ref) return null;
+        refs.push(ref);
+      }
+      return refs;
+    }
+
+    /** 1 文字ぶん進める。括弧・引用符はまとめて読み飛ばす（ラベル内の --> を誤検出しないため） */
+    _skipOperandChar(src, pos) {
+      const ch = src[pos];
+      if (ch === '"') {
+        const q = src.indexOf('"', pos + 1);
+        return q < 0 ? src.length : q + 1;
+      }
+      if (ch === '[' || ch === '(' || ch === '{') return this._skipBracket(src, pos);
+      return pos + 1;
+    }
+
+    /** src[pos] の開き括弧に対応する閉じ括弧の次の位置を返す */
+    _skipBracket(src, pos) {
+      const CLOSE_OF = { '[': ']', '(': ')', '{': '}' };
+      const stack = [];
+      let i = pos;
+      while (i < src.length) {
+        const c = src[i];
+        if (c === '"') {
+          const q = src.indexOf('"', i + 1);
+          i = q < 0 ? src.length : q + 1;
+          continue;
+        }
+        if (CLOSE_OF[c]) { stack.push(CLOSE_OF[c]); i++; continue; }
+        if (c === ']' || c === ')' || c === '}') {
+          if (stack.length > 0 && stack[stack.length - 1] === c) stack.pop();
+          i++;
+          if (stack.length === 0) return i;
+          continue;
+        }
+        i++;
+      }
+      return src.length;
+    }
+
+    _parseNodeRef(str) {
+      let s = (str || '').trim();
+      if (!s) return null;
+
+      // :::className（クラス指定）は切り離して保持する
+      let classes = '';
+      const cm = s.match(/:::([A-Za-z0-9_\-]+)$/);
+      if (cm) {
+        classes = cm[1];
+        s = s.substring(0, s.length - cm[0].length).trim();
+        if (!s) return null;
+      }
+
+      for (const p of NODE_REF_PATTERNS) {
+        const m = s.match(p.re);
+        if (!m) continue;
+        // GUI で扱えない形状（非対称形 / @{...}）は原文をそのまま保持する
+        if (p.shape === 'raw') return { id: m[1], label: '', shape: 'rect', raw: s, classes };
+        return { id: m[1], label: m[2], shape: p.shape, classes };
+      }
+
+      const plain = s.match(PLAIN_ID_RE);
+      if (plain) return { id: plain[1], label: '', shape: 'rect', classes };
       return null;
     }
   }
@@ -802,11 +1109,8 @@
         const row = el('div', 'mve-edge-row' + (idx === this.selectedEdgeIndex ? ' mve-selected' : ''));
         row.dataset.edgeIndex = String(idx);
 
-        const fromNode = this.model.nodes.get(edge.from);
-        const toNode = this.model.nodes.get(edge.to);
-        const fromLabel = fromNode ? fromNode.label : edge.from;
-        const toLabel = toNode ? toNode.label : edge.to;
-        const edgeType = EDGE_TYPES[edge.type] || EDGE_TYPES.arrow;
+        const fromLabel = this._endpointLabel(edge.from);
+        const toLabel = this._endpointLabel(edge.to);
 
         // From label
         const fromSpan = el('span', 'mve-edge-desc');
@@ -816,7 +1120,7 @@
 
         // Edge type button — click to cycle through types
         const typeBtn = el('button', 'mve-edge-type-btn');
-        typeBtn.textContent = edgeType.label;
+        typeBtn.textContent = edgeTypeLabel(edge);
         typeBtn.title = '線種を切り替え（クリックでサイクル）';
         typeBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1047,7 +1351,7 @@
         };
         window.DiagramCommon.showContextMenu(e.clientX, e.clientY, [
           { label: '✎ 接続を編集', onClick: () => this._editEdgeLabel(idx, { clientX: e.clientX, clientY: e.clientY }) },
-          { label: '↻ 線種を切替: ' + EDGE_TYPES[edge.type || 'arrow'].label, onClick: cycleType },
+          { label: '↻ 線種を切替: ' + edgeTypeLabel(edge), onClick: cycleType },
           'separator',
           { label: '🗑 接続を削除', danger: true, onClick: () => this._removeEdge(idx) },
         ]);
@@ -1410,10 +1714,19 @@
       typeLabel.textContent = '線の種類: ';
       typeRow.appendChild(typeLabel);
       const typeSelect = el('select', 'mve-edge-prompt-input');
+      // GUI に無い記法（--o / <--> / ---- など）はそのまま残せるようにする
+      const keepsSyntax = !EDGE_TYPES[edge.type];
+      if (keepsSyntax) {
+        const keepOpt = document.createElement('option');
+        keepOpt.value = KEEP_EDGE_SYNTAX;
+        keepOpt.textContent = '現在の記法 ' + (edge.raw || '');
+        keepOpt.selected = true;
+        typeSelect.appendChild(keepOpt);
+      }
       for (const [key, et] of Object.entries(EDGE_TYPES)) {
         const opt = document.createElement('option');
         opt.value = key; opt.textContent = et.label;
-        if (key === (edge.type || 'arrow')) opt.selected = true;
+        if (!keepsSyntax && key === (edge.type || 'arrow')) opt.selected = true;
         typeSelect.appendChild(opt);
       }
       typeRow.appendChild(typeSelect);
@@ -1432,15 +1745,16 @@
       dialog.appendChild(labelRow);
 
       // Direction: from / to selectors
-      const nodeEntries = [...this.model.nodes.entries()];
+      // サブグラフ同士の接続（SG1 --> SG2）も編集できるよう候補に含める
+      const nodeEntries = this._endpointCandidates();
       const fromRow = el('div', 'mve-edge-prompt-row');
       const fromLabel = el('span', 'mve-edge-prompt-label');
       fromLabel.textContent = '接続元: ';
       fromRow.appendChild(fromLabel);
       const fromSelect = el('select', 'mve-edge-prompt-input');
-      for (const [id, n] of nodeEntries) {
+      for (const [id, text] of nodeEntries) {
         const opt = document.createElement('option');
-        opt.value = id; opt.textContent = n.label || id;
+        opt.value = id; opt.textContent = text;
         if (id === edge.from) opt.selected = true;
         fromSelect.appendChild(opt);
       }
@@ -1452,9 +1766,9 @@
       toLabel.textContent = '接続先: ';
       toRow.appendChild(toLabel);
       const toSelect = el('select', 'mve-edge-prompt-input');
-      for (const [id, n] of nodeEntries) {
+      for (const [id, text] of nodeEntries) {
         const opt = document.createElement('option');
-        opt.value = id; opt.textContent = n.label || id;
+        opt.value = id; opt.textContent = text;
         if (id === edge.to) opt.selected = true;
         toSelect.appendChild(opt);
       }
@@ -1483,7 +1797,7 @@
         edge.from = fromSelect.value;
         edge.to = toSelect.value;
         this.model.updateEdgeLabel(index, input.value);
-        this.model.updateEdgeType(index, typeSelect.value);
+        if (typeSelect.value !== KEEP_EDGE_SYNTAX) this.model.updateEdgeType(index, typeSelect.value);
         dialog.remove();
         this._commitChange();
       };
@@ -1540,11 +1854,28 @@
       this._setStatus('接続 ' + desc + ' を削除しました。');
     }
 
+    /** 接続の端点（ノード／サブグラフ）の表示名 */
+    _endpointLabel(id) {
+      const n = this.model.nodes.get(id);
+      if (n) return n.label || id;
+      const sg = this.model.subgraphs.find(s => s.id === id);
+      if (sg) return (sg.label || id) + '（グループ）';
+      return id;
+    }
+
+    /** 接続元／接続先の候補（ノード＋サブグラフ） */
+    _endpointCandidates() {
+      const list = [];
+      for (const [id, n] of this.model.nodes) list.push([id, n.label || id]);
+      for (const sg of this.model.subgraphs) list.push([sg.id, (sg.label || sg.id) + '（グループ）']);
+      return list;
+    }
+
     _edgeDescription(index) {
       const e = this.model.edges[index];
       if (!e) return '';
-      const f = this.model.nodes.get(e.from)?.label || e.from;
-      const t = this.model.nodes.get(e.to)?.label || e.to;
+      const f = this._endpointLabel(e.from);
+      const t = this._endpointLabel(e.to);
       return f + ' → ' + t + (e.label ? ' 「' + e.label + '」' : '');
     }
 
@@ -2010,7 +2341,8 @@
         direction: this.model.direction,
         layout: this.model.layout,
         styles: Array.from(this.model.styles.entries()),
-        subgraphs: this.model.subgraphs.map(sg => ({ ...sg, nodeIds: [...sg.nodeIds] })),
+        subgraphs: this.model.subgraphs.map(sg => ({ ...sg, nodeIds: [...sg.nodeIds], extras: [...(sg.extras || [])] })),
+        extras: [...this.model.extras],
       };
     }
 
@@ -2020,7 +2352,8 @@
       this.model.direction = snap.direction;
       this.model.layout = snap.layout || 'dagre';
       this.model.styles = new Map(snap.styles || []);
-      this.model.subgraphs = (snap.subgraphs || []).map(sg => ({ ...sg, nodeIds: [...sg.nodeIds] }));
+      this.model.subgraphs = (snap.subgraphs || []).map(sg => ({ ...sg, nodeIds: [...sg.nodeIds], extras: [...(sg.extras || [])] }));
+      this.model.extras = [...(snap.extras || [])];
     }
 
     _commitChange() {
